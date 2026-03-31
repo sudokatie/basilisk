@@ -5,7 +5,9 @@
 pub mod cell;
 pub mod grid;
 pub mod cursor;
+pub mod terminal;
 
 pub use cell::{Cell, CellFlags, Color};
 pub use grid::{Grid, Row};
 pub use cursor::{Cursor, CursorShape, SavedCursor};
+pub use terminal::Terminal;

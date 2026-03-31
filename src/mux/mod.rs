@@ -6,3 +6,5 @@ pub mod pane;
 pub mod layout;
 pub mod window;
 pub mod session;
+
+pub use pane::{Pane, PaneId};

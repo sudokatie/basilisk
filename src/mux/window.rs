@@ -13,10 +13,11 @@ pub struct Window {
 
 impl Window {
     pub fn new(id: usize, name: String, initial_pane: Pane) -> Self {
+        let pane_id = initial_pane.id().0 as usize;
         Self {
             id,
             name,
-            layout: Layout::leaf(initial_pane.id()),
+            layout: Layout::leaf(pane_id),
             panes: vec![initial_pane],
             active_pane: 0,
         }

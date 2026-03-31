@@ -1,0 +1,58 @@
+[package]
+name = "basilisk"
+version = "0.1.0"
+edition = "2021"
+description = "GPU-accelerated terminal emulator with built-in multiplexing"
+license = "MIT"
+repository = "https://github.com/sudokatie/basilisk"
+keywords = ["terminal", "emulator", "gpu", "wgpu"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+# Windowing and GPU
+winit = "0.30"
+wgpu = "24"
+pollster = "0.4"
+
+# Font rendering
+fontdue = "0.9"
+
+# Terminal
+unicode-segmentation = "1.11"
+unicode-width = "0.2"
+bitflags = "2"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# PTY (Unix only)
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["term", "process", "signal", "fs"] }
+libc = "0.2"
+
+# Config and serialization
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Error handling
+thiserror = "2"
+
+# GPU buffer types
+bytemuck = { version = "1", features = ["derive"] }
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Directories
+dirs = "6"
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "basilisk"
+path = "src/main.rs"

@@ -1,0 +1,8 @@
+//! Multiplexer (tmux-like functionality)
+//!
+//! Session, window, and pane management with flexible layouts.
+
+pub mod pane;
+pub mod layout;
+pub mod window;
+pub mod session;

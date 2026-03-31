@@ -29,7 +29,6 @@ impl Pty {
         let pty = openpty(Some(&winsize), None)
             .map_err(|e| Error::Pty(e.to_string()))?;
 
-        let master_fd = pty.master.as_raw_fd();
         let slave_fd = pty.slave.as_raw_fd();
 
         match unsafe { fork() } {
@@ -122,15 +121,56 @@ impl Drop for Pty {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread::sleep;
+    use std::time::Duration;
+
+    fn skip_if_ci() -> bool {
+        std::env::var("CI").is_ok()
+    }
 
     #[test]
     fn pty_spawn() {
-        // This test requires a real shell, skip in CI
-        if std::env::var("CI").is_ok() {
-            return;
-        }
+        if skip_if_ci() { return; }
 
         let pty = Pty::spawn("/bin/sh", 80, 24);
         assert!(pty.is_ok());
+        let pty = pty.unwrap();
+        assert!(pty.pid() > 0);
+    }
+
+    #[test]
+    fn pty_resize() {
+        if skip_if_ci() { return; }
+
+        let pty = Pty::spawn("/bin/sh", 80, 24).unwrap();
+        let result = pty.resize(120, 40);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn pty_write_read() {
+        if skip_if_ci() { return; }
+
+        let mut pty = Pty::spawn("/bin/sh", 80, 24).unwrap();
+
+        // Write a command
+        let written = pty.write(b"echo hello\n").unwrap();
+        assert!(written > 0);
+
+        // Give shell time to respond
+        sleep(Duration::from_millis(100));
+
+        // Read response
+        let mut buf = [0u8; 256];
+        let read = pty.read(&mut buf).unwrap();
+        assert!(read > 0);
+    }
+
+    #[test]
+    fn pty_master_fd() {
+        if skip_if_ci() { return; }
+
+        let pty = Pty::spawn("/bin/sh", 80, 24).unwrap();
+        assert!(pty.master_fd() >= 0);
     }
 }

@@ -4,3 +4,5 @@
 
 pub mod keyboard;
 pub mod bindings;
+
+pub use keyboard::KeyboardHandler;

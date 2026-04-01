@@ -12,6 +12,8 @@ pub mod render;
 pub mod input;
 pub mod config;
 pub mod app;
+pub mod clipboard;
 
 pub use error::{Error, Result};
 pub use app::App;
+pub use clipboard::Clipboard;

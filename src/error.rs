@@ -22,6 +22,9 @@ pub enum Error {
 
     #[error("Parse error: {0}")]
     Parse(String),
+
+    #[error("Clipboard error: {0}")]
+    Clipboard(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

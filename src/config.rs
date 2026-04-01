@@ -14,6 +14,7 @@ pub struct Config {
     pub colors: ColorScheme,
     pub scrollback: ScrollbackConfig,
     pub window: WindowConfig,
+    pub terminal: TerminalConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -58,9 +59,19 @@ pub struct ScrollbackConfig {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct WindowConfig {
+    pub width: u32,
+    pub height: u32,
     pub decorations: String,
     pub opacity: f32,
     pub padding: u32,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct TerminalConfig {
+    pub shell: String,
+    pub cols: u16,
+    pub rows: u16,
 }
 
 impl Default for Config {
@@ -70,6 +81,7 @@ impl Default for Config {
             colors: ColorScheme::default(),
             scrollback: ScrollbackConfig::default(),
             window: WindowConfig::default(),
+            terminal: TerminalConfig::default(),
         }
     }
 }
@@ -120,9 +132,21 @@ impl Default for ScrollbackConfig {
 impl Default for WindowConfig {
     fn default() -> Self {
         Self {
+            width: 800,
+            height: 600,
             decorations: "full".into(),
             opacity: 1.0,
             padding: 2,
+        }
+    }
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        Self {
+            shell: std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()),
+            cols: 80,
+            rows: 24,
         }
     }
 }

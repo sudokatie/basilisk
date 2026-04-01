@@ -10,3 +10,4 @@ pub mod session;
 pub use pane::{Pane, PaneId};
 pub use window::{Window, WindowId, SplitDirection};
 pub use layout::{Layout, Rect};
+pub use session::{Session, SessionId};

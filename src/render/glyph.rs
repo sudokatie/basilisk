@@ -139,6 +139,63 @@ pub fn load_system_font() -> Option<Vec<u8>> {
     None
 }
 
+/// Load a font from a file path
+/// Supports direct paths and font family names (searches common directories)
+pub fn load_font_file(path: &str) -> Option<Vec<u8>> {
+    // Try direct path first
+    if let Ok(data) = std::fs::read(path) {
+        return Some(data);
+    }
+
+    // Try common font directories with the filename
+    let font_dirs = [
+        // macOS
+        "/System/Library/Fonts",
+        "/Library/Fonts",
+        "~/Library/Fonts",
+        // Linux
+        "/usr/share/fonts/truetype",
+        "/usr/share/fonts/TTF",
+        "/usr/local/share/fonts",
+        "~/.local/share/fonts",
+        // Windows
+        "C:/Windows/Fonts",
+    ];
+
+    let filename = std::path::Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(path);
+
+    for dir in font_dirs {
+        let expanded = if dir.starts_with('~') {
+            if let Some(home) = dirs::home_dir() {
+                home.join(&dir[2..])
+            } else {
+                continue;
+            }
+        } else {
+            std::path::PathBuf::from(dir)
+        };
+
+        // Try exact filename
+        let full_path = expanded.join(filename);
+        if let Ok(data) = std::fs::read(&full_path) {
+            return Some(data);
+        }
+
+        // Try with common extensions
+        for ext in &["ttf", "otf", "ttc"] {
+            let with_ext = expanded.join(format!("{}.{}", filename, ext));
+            if let Ok(data) = std::fs::read(&with_ext) {
+                return Some(data);
+            }
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -6,3 +6,4 @@ pub mod keyboard;
 pub mod bindings;
 
 pub use keyboard::KeyboardHandler;
+pub use crate::render::window::{KeyCode, Modifiers};

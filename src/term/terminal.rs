@@ -1,6 +1,8 @@
 //! Terminal state combining grid, cursor, and parser
 
+use unicode_segmentation::UnicodeSegmentation;
 use crate::ansi::{Attr, Handler, Parser, Action, csi_dispatch, osc_dispatch};
+use crate::render::sixel::SixelDecoder;
 use super::cell::{CellFlags, Color};
 use super::cursor::{Cursor, SavedCursor};
 use super::grid::Grid;
@@ -9,6 +11,81 @@ use super::grid::Grid;
 const DEFAULT_FG: Color = Color { r: 204, g: 204, b: 204 };
 /// Default background color (black)
 const DEFAULT_BG: Color = Color { r: 0, g: 0, b: 0 };
+
+/// Get the length of a UTF-8 sequence from its first byte
+fn utf8_sequence_length(byte: u8) -> usize {
+    if byte < 0x80 {
+        1
+    } else if byte < 0xC0 {
+        1 // Invalid start byte, treat as 1
+    } else if byte < 0xE0 {
+        2
+    } else if byte < 0xF0 {
+        3
+    } else {
+        4
+    }
+}
+
+/// Item to process after UTF-8 decoding
+#[derive(Clone, Copy)]
+enum ProcessItem {
+    Byte(u8),
+    Char(char),
+}
+
+/// Sixel image placed in terminal
+#[derive(Debug, Clone)]
+pub struct SixelPlacement {
+    /// Image data (RGBA)
+    pub data: Vec<u8>,
+    /// Image width in pixels
+    pub width: u32,
+    /// Image height in pixels
+    pub height: u32,
+    /// Column position where image starts
+    pub col: u16,
+    /// Row position where image starts
+    pub row: u16,
+}
+
+/// Terminal mode flags
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TerminalModes {
+    /// DECCKM - Application cursor keys
+    pub application_cursor: bool,
+    /// DECAWM - Auto-wrap mode
+    pub auto_wrap: bool,
+    /// DECOM - Origin mode (cursor relative to scroll region)
+    pub origin_mode: bool,
+    /// DECTCEM - Cursor visible
+    pub cursor_visible: bool,
+    /// Bracketed paste mode
+    pub bracketed_paste: bool,
+    /// Focus reporting
+    pub focus_reporting: bool,
+    /// Mouse tracking modes
+    pub mouse_tracking: MouseMode,
+}
+
+/// Mouse tracking mode
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MouseMode {
+    #[default]
+    None,
+    X10,           // Button press only
+    Normal,        // Button press/release
+    ButtonMotion,  // Press/release + motion while pressed
+    AnyMotion,     // All motion events
+    Sgr,           // SGR extended coordinates
+}
+
+/// Active hyperlink
+#[derive(Debug, Clone)]
+pub struct Hyperlink {
+    pub id: Option<String>,
+    pub url: String,
+}
 
 /// Complete terminal state
 pub struct Terminal {
@@ -20,6 +97,18 @@ pub struct Terminal {
     scroll_top: u16,
     scroll_bottom: u16,
     tab_stops: Vec<bool>,
+    /// UTF-8 decoding buffer for incomplete sequences
+    utf8_buffer: Vec<u8>,
+    /// Terminal modes
+    modes: TerminalModes,
+    /// Sixel images in terminal
+    sixel_images: Vec<SixelPlacement>,
+    /// Sixel decoder for parsing DCS sequences
+    sixel_decoder: SixelDecoder,
+    /// Current hyperlink (OSC 8)
+    current_hyperlink: Option<Hyperlink>,
+    /// Working directory (OSC 7)
+    working_directory: Option<String>,
 }
 
 impl Terminal {
@@ -40,11 +129,113 @@ impl Terminal {
             scroll_top: 0,
             scroll_bottom: rows.saturating_sub(1),
             tab_stops,
+            utf8_buffer: Vec::new(),
+            modes: TerminalModes {
+                cursor_visible: true,
+                auto_wrap: true,
+                ..Default::default()
+            },
+            sixel_images: Vec::new(),
+            sixel_decoder: SixelDecoder::new(),
+            current_hyperlink: None,
+            working_directory: None,
         }
     }
 
-    /// Process input bytes
+    /// Get terminal modes
+    pub fn modes(&self) -> &TerminalModes {
+        &self.modes
+    }
+
+    /// Get mutable terminal modes
+    pub fn modes_mut(&mut self) -> &mut TerminalModes {
+        &mut self.modes
+    }
+
+    /// Get sixel images
+    pub fn sixel_images(&self) -> &[SixelPlacement] {
+        &self.sixel_images
+    }
+
+    /// Clear sixel images
+    pub fn clear_sixel_images(&mut self) {
+        self.sixel_images.clear();
+    }
+
+    /// Get current hyperlink
+    pub fn current_hyperlink(&self) -> Option<&Hyperlink> {
+        self.current_hyperlink.as_ref()
+    }
+
+    /// Get working directory
+    pub fn working_directory(&self) -> Option<&str> {
+        self.working_directory.as_deref()
+    }
+
+    /// Process input bytes with proper UTF-8 and grapheme cluster handling
     pub fn process(&mut self, bytes: &[u8]) {
+        // Append new bytes to buffer for UTF-8 continuation handling
+        self.utf8_buffer.extend_from_slice(bytes);
+        
+        // Collect characters to process (avoids borrow conflicts)
+        let mut chars_to_process: Vec<ProcessItem> = Vec::new();
+        let mut i = 0;
+        
+        while i < self.utf8_buffer.len() {
+            let byte = self.utf8_buffer[i];
+            
+            // Check if this is an escape or control character
+            if byte < 0x20 || byte == 0x1b || byte == 0x7f {
+                chars_to_process.push(ProcessItem::Byte(byte));
+                i += 1;
+                continue;
+            }
+            
+            // Try to decode UTF-8
+            let seq_len = utf8_sequence_length(byte);
+            if i + seq_len > self.utf8_buffer.len() {
+                // Incomplete UTF-8 sequence, keep in buffer
+                break;
+            }
+            
+            // Decode and collect characters
+            if let Ok(s) = std::str::from_utf8(&self.utf8_buffer[i..i + seq_len]) {
+                for grapheme in s.graphemes(true) {
+                    if let Some(c) = grapheme.chars().next() {
+                        chars_to_process.push(ProcessItem::Char(c));
+                    }
+                }
+            }
+            
+            i += seq_len;
+        }
+        
+        // Drain processed bytes
+        if i > 0 {
+            self.utf8_buffer.drain(0..i);
+        }
+        
+        // Now process collected items
+        for item in chars_to_process {
+            match item {
+                ProcessItem::Byte(byte) => {
+                    if let Some(action) = self.parser.advance(byte) {
+                        self.execute(action);
+                    }
+                }
+                ProcessItem::Char(c) => {
+                    if let Some(action) = self.parser.advance_char(c) {
+                        self.execute(action);
+                    } else if self.parser.is_ground() {
+                        self.input(c);
+                    }
+                }
+            }
+        }
+    }
+    
+    /// Process input bytes (simple version for non-UTF8 contexts)
+    pub fn process_raw(&mut self, bytes: &[u8]) {
         for &byte in bytes {
             if let Some(action) = self.parser.advance(byte) {
                 self.execute(action);
@@ -63,8 +254,8 @@ impl Terminal {
             Action::OscDispatch(params) => {
                 osc_dispatch(self, &params);
             }
-            Action::DcsDispatch { .. } => {
-                // DCS sequences not implemented yet
+            Action::DcsDispatch { params, intermediates, data } => {
+                self.handle_dcs(&params, &intermediates, &data);
             }
         }
     }
@@ -80,6 +271,48 @@ impl Terminal {
             0x0C => self.linefeed(),       // FF (treated as LF)
             0x0D => self.carriage_return(), // CR
             _ => {}
+        }
+    }
+
+    /// Handle DCS (Device Control String) sequences
+    fn handle_dcs(&mut self, params: &[u16], _intermediates: &[u8], data: &[u8]) {
+        // Check if this is a sixel sequence (DCS P1;P2;P3 q ...)
+        // The 'q' is typically consumed before we get here, so check data
+        if data.is_empty() {
+            return;
+        }
+
+        // Sixel sequences: params are aspect ratio hints, data contains sixel commands
+        // Reset decoder for new image
+        self.sixel_decoder.reset();
+        
+        // Decode sixel data
+        self.sixel_decoder.decode(data);
+        
+        // Get the decoded image
+        let image = self.sixel_decoder.image();
+        
+        if image.width > 0 && image.height > 0 {
+            // Place image at current cursor position
+            let placement = SixelPlacement {
+                data: image.data.clone(),
+                width: image.width,
+                height: image.height,
+                col: self.cursor.col,
+                row: self.cursor.line,
+            };
+            
+            self.sixel_images.push(placement);
+            
+            // Advance cursor past the image (sixel spec says cursor moves down)
+            // Calculate how many rows the image occupies
+            // Assuming cell_height is roughly 16 pixels (we'd need actual metrics)
+            let cell_height = 16u32; // Default assumption
+            let rows_needed = (image.height + cell_height - 1) / cell_height;
+            
+            for _ in 0..rows_needed {
+                self.linefeed();
+            }
         }
     }
 
@@ -459,6 +692,59 @@ impl Handler for Terminal {
         } else {
             self.cursor.line += 1;
         }
+    }
+
+    fn set_mode(&mut self, mode: u16, enable: bool) {
+        match mode {
+            1 => self.modes.application_cursor = enable,    // DECCKM
+            6 => self.modes.origin_mode = enable,           // DECOM
+            7 => self.modes.auto_wrap = enable,             // DECAWM
+            25 => {                                          // DECTCEM
+                self.cursor.visible = enable;
+                self.modes.cursor_visible = enable;
+            }
+            1000 => {                                        // X10 mouse
+                self.modes.mouse_tracking = if enable { MouseMode::X10 } else { MouseMode::None };
+            }
+            1002 => {                                        // Button-event mouse
+                self.modes.mouse_tracking = if enable { MouseMode::ButtonMotion } else { MouseMode::None };
+            }
+            1003 => {                                        // Any-event mouse
+                self.modes.mouse_tracking = if enable { MouseMode::AnyMotion } else { MouseMode::None };
+            }
+            1006 => {                                        // SGR mouse mode
+                if enable {
+                    self.modes.mouse_tracking = MouseMode::Sgr;
+                }
+            }
+            1004 => self.modes.focus_reporting = enable,    // Focus events
+            2004 => self.modes.bracketed_paste = enable,    // Bracketed paste
+            _ => {} // Unknown mode, ignore
+        }
+    }
+
+    fn set_hyperlink(&mut self, id: Option<&str>, url: Option<&str>) {
+        match url {
+            Some(url) if !url.is_empty() => {
+                self.current_hyperlink = Some(Hyperlink {
+                    id: id.map(|s| s.to_string()),
+                    url: url.to_string(),
+                });
+            }
+            _ => {
+                self.current_hyperlink = None;
+            }
+        }
+    }
+
+    fn set_working_directory(&mut self, path: &str) {
+        self.working_directory = Some(path.to_string());
+    }
+
+    fn clipboard(&mut self, _clipboard: char, _data: Option<&str>) {
+        // Clipboard operations are handled at the application level
+        // Terminal just receives the request but doesn't act on it directly
+        // for security reasons (per spec: "many terminals disable this by default")
     }
 }
 

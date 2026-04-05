@@ -1,68 +1,82 @@
-//! Text rendering pipeline
-//!
-//! Converts terminal grid cells into GPU vertices for rendering.
+//! Text rendering - connects terminal grid to GPU renderer
 
-use crate::term::{Grid, Cell, CellFlags, Color};
-use crate::render::atlas::{Atlas, GlyphKey, GlyphInfo};
-use crate::render::glyph::Font;
-use crate::render::renderer::Vertex;
+use crate::config::{ColorScheme, FontConfig};
+use crate::term::cell::{Cell, CellFlags, Color};
+use crate::term::cursor::Cursor;
+use crate::term::grid::Grid;
+use crate::term::selection::SelectionManager;
+use crate::Result;
 
-/// Text renderer that converts terminal state to vertices
+use super::atlas::{Atlas, GlyphKey, GlyphInfo};
+use super::glyph::{Font, load_system_font, load_font_file};
+use super::renderer::Vertex;
+
+/// Text renderer - generates GPU vertices from terminal state
 pub struct TextRenderer {
-    /// Glyph atlas for caching
+    font: Font,
+    bold_font: Option<Font>,
+    italic_font: Option<Font>,
     atlas: Atlas,
-    /// Font for rasterization
-    font: Option<Font>,
-    /// Cell dimensions
     cell_width: f32,
     cell_height: f32,
-    /// Viewport dimensions in pixels
-    viewport_width: f32,
-    viewport_height: f32,
+    ascent: f32,
+    screen_width: f32,
+    screen_height: f32,
 }
 
 impl TextRenderer {
     /// Create a new text renderer
-    pub fn new(atlas_size: u32) -> Self {
-        Self {
-            atlas: Atlas::new(atlas_size, atlas_size),
-            font: None,
-            cell_width: 8.0,
-            cell_height: 16.0,
-            viewport_width: 800.0,
-            viewport_height: 600.0,
-        }
-    }
+    pub fn new(config: &FontConfig) -> Result<Self> {
+        // Load fonts
+        let font_data = load_system_font()
+            .ok_or_else(|| crate::Error::Font("No system font found".into()))?;
 
-    /// Set the font
-    pub fn set_font(&mut self, font: Font) {
-        self.cell_width = font.cell_width();
-        self.cell_height = font.line_height();
-        self.font = Some(font);
-    }
+        let font = Font::from_bytes(&font_data, config.size)
+            .ok_or_else(|| crate::Error::Font("Failed to parse font".into()))?;
 
-    /// Set viewport size
-    pub fn set_viewport(&mut self, width: f32, height: f32) {
-        self.viewport_width = width;
-        self.viewport_height = height;
+        // Try to load bold/italic variants (optional)
+        let bold_font = config.bold_font.as_ref()
+            .and_then(|path| load_font_file(path))
+            .and_then(|data| Font::from_bytes(&data, config.size));
+        let italic_font = config.italic_font.as_ref()
+            .and_then(|path| load_font_file(path))
+            .and_then(|data| Font::from_bytes(&data, config.size));
+
+        let cell_width = font.cell_width();
+        let cell_height = font.line_height();
+        let ascent = font.ascent();
+
+        let atlas = Atlas::new(2048, 2048);
+
+        Ok(Self {
+            font,
+            bold_font,
+            italic_font,
+            atlas,
+            cell_width,
+            cell_height,
+            ascent,
+            screen_width: 800.0,
+            screen_height: 600.0,
+        })
     }
 
     /// Get cell dimensions
-    pub fn cell_size(&self) -> (f32, f32) {
-        (self.cell_width, self.cell_height)
+    pub fn cell_width(&self) -> f32 {
+        self.cell_width
     }
 
-    /// Get atlas reference (for GPU upload)
-    pub fn atlas(&self) -> &Atlas {
-        &self.atlas
+    pub fn cell_height(&self) -> f32 {
+        self.cell_height
     }
 
-    /// Get mutable atlas
-    pub fn atlas_mut(&mut self) -> &mut Atlas {
-        &mut self.atlas
+    /// Set screen dimensions for coordinate conversion
+    pub fn set_screen_size(&mut self, width: f32, height: f32) {
+        self.screen_width = width;
+        self.screen_height = height;
     }
 
-    /// Check if atlas needs GPU upload
+    /// Check if atlas needs upload
     pub fn atlas_dirty(&self) -> bool {
         self.atlas.is_dirty()
     }
@@ -72,220 +86,274 @@ impl TextRenderer {
         self.atlas.mark_clean();
     }
 
-    /// Render a grid to vertices
-    pub fn render_grid(&mut self, grid: &Grid, cursor_col: u16, cursor_line: u16, cursor_visible: bool) -> (Vec<Vertex>, Vec<u32>) {
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
-
-        let cols = grid.cols();
-        let rows = grid.lines();
-
-        // Render each cell
-        for row in 0..rows {
-            for col in 0..cols {
-                let cell = grid.cell(col, row);
-                self.render_cell(
-                    &mut vertices,
-                    &mut indices,
-                    cell,
-                    col,
-                    row,
-                );
-            }
-        }
-
-        // Render cursor
-        if cursor_visible && cursor_col < cols && cursor_line < rows {
-            self.render_cursor(&mut vertices, &mut indices, cursor_col, cursor_line);
-        }
-
-        (vertices, indices)
+    /// Get atlas data for GPU upload
+    pub fn atlas_data(&self) -> (&[u8], u32, u32) {
+        let (w, h) = self.atlas.size();
+        (self.atlas.data(), w, h)
     }
 
-    /// Render a single cell
+    /// Get font for given flags
+    fn get_font(&self, flags: CellFlags) -> &Font {
+        if flags.contains(CellFlags::BOLD) {
+            self.bold_font.as_ref().unwrap_or(&self.font)
+        } else if flags.contains(CellFlags::ITALIC) {
+            self.italic_font.as_ref().unwrap_or(&self.font)
+        } else {
+            &self.font
+        }
+    }
+
+    /// Get glyph flags for atlas key
+    fn glyph_flags(cell_flags: CellFlags) -> u8 {
+        let mut flags = 0u8;
+        if cell_flags.contains(CellFlags::BOLD) { flags |= 1; }
+        if cell_flags.contains(CellFlags::ITALIC) { flags |= 2; }
+        flags
+    }
+
+    /// Convert color to float array
+    fn color_to_array(color: &Color) -> [f32; 4] {
+        [
+            color.r as f32 / 255.0,
+            color.g as f32 / 255.0,
+            color.b as f32 / 255.0,
+            1.0,
+        ]
+    }
+
+    /// Parse hex color string
+    fn parse_hex_color(hex: &str) -> Color {
+        let hex = hex.trim_start_matches('#');
+        if hex.len() >= 6 {
+            let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(255);
+            let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(255);
+            let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(255);
+            Color::rgb(r, g, b)
+        } else {
+            Color::rgb(255, 255, 255)
+        }
+    }
+
+    /// Convert pixel position to clip space (-1 to 1)
+    fn to_clip_x(&self, x: f32) -> f32 {
+        (x / self.screen_width) * 2.0 - 1.0
+    }
+
+    fn to_clip_y(&self, y: f32) -> f32 {
+        1.0 - (y / self.screen_height) * 2.0
+    }
+
+    /// Render a grid cell to vertices
     fn render_cell(
         &mut self,
-        vertices: &mut Vec<Vertex>,
-        indices: &mut Vec<u32>,
-        cell: &Cell,
         col: u16,
         row: u16,
+        cell: &Cell,
+        cursor_here: bool,
+        selected: bool,
+        default_fg: &Color,
+        default_bg: &Color,
+        cursor_color: &Color,
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
     ) {
-        // Calculate screen position (normalized device coordinates)
-        let x = self.col_to_ndc(col as f32);
-        let y = self.row_to_ndc(row as f32);
-        let w = self.cell_width / self.viewport_width * 2.0;
-        let h = self.cell_height / self.viewport_height * 2.0;
-
-        // Get colors (handle inverse)
-        let (fg, bg) = if cell.flags.contains(CellFlags::INVERSE) {
-            (cell.bg, cell.fg)
-        } else {
-            (cell.fg, cell.bg)
-        };
-
-        let fg_arr = color_to_array(&fg);
-        let bg_arr = color_to_array(&bg);
-
-        // Always render background quad
-        let base_idx = vertices.len() as u32;
-        
-        // Background quad (full cell)
-        vertices.push(Vertex {
-            position: [x, y],
-            tex_coords: [0.0, 0.0],
-            color: fg_arr,
-            bg_color: bg_arr,
-        });
-        vertices.push(Vertex {
-            position: [x + w, y],
-            tex_coords: [0.0, 0.0],
-            color: fg_arr,
-            bg_color: bg_arr,
-        });
-        vertices.push(Vertex {
-            position: [x + w, y - h],
-            tex_coords: [0.0, 0.0],
-            color: fg_arr,
-            bg_color: bg_arr,
-        });
-        vertices.push(Vertex {
-            position: [x, y - h],
-            tex_coords: [0.0, 0.0],
-            color: fg_arr,
-            bg_color: bg_arr,
-        });
-
-        indices.extend_from_slice(&[
-            base_idx, base_idx + 1, base_idx + 2,
-            base_idx, base_idx + 2, base_idx + 3,
-        ]);
-
-        // Skip glyph rendering for space or empty
-        if cell.c == ' ' || cell.c == '\0' {
-            return;
-        }
-
-        // Skip wide spacer cells
+        // Skip spacer cells (second half of wide chars)
         if cell.flags.contains(CellFlags::WIDE_SPACER) {
             return;
         }
 
-        // Get glyph info from atlas
-        let flags = self.cell_flags_to_glyph_flags(&cell.flags);
-        let key = GlyphKey::new(cell.c, flags);
+        // Calculate cell position
+        let x = col as f32 * self.cell_width;
+        let y = row as f32 * self.cell_height;
 
-        if let Some(font) = &self.font {
-            if let Some(glyph_info) = self.atlas.cache(key, font) {
-                if glyph_info.width > 0 && glyph_info.height > 0 {
-                    self.render_glyph(vertices, indices, &glyph_info, x, y, w, h, fg_arr, bg_arr);
-                }
-            }
+        let cell_w = if cell.flags.contains(CellFlags::WIDE) {
+            self.cell_width * 2.0
+        } else {
+            self.cell_width
+        };
+
+        // Determine colors
+        let mut fg = if cell.fg.r == 255 && cell.fg.g == 255 && cell.fg.b == 255 &&
+                        cell.flags.is_empty() {
+            *default_fg
+        } else {
+            cell.fg
+        };
+
+        let mut bg = if cell.bg.r == 0 && cell.bg.g == 0 && cell.bg.b == 0 &&
+                        cell.flags.is_empty() {
+            *default_bg
+        } else {
+            cell.bg
+        };
+
+        // Handle inverse
+        if cell.flags.contains(CellFlags::INVERSE) {
+            std::mem::swap(&mut fg, &mut bg);
         }
-    }
 
-    /// Render a glyph quad
-    fn render_glyph(
-        &self,
-        vertices: &mut Vec<Vertex>,
-        indices: &mut Vec<u32>,
-        glyph: &GlyphInfo,
-        cell_x: f32,
-        cell_y: f32,
-        cell_w: f32,
-        cell_h: f32,
-        fg: [f32; 4],
-        bg: [f32; 4],
-    ) {
-        let atlas_size = self.atlas.size().0 as f32;
+        // Handle selection
+        if selected {
+            std::mem::swap(&mut fg, &mut bg);
+        }
 
-        // Calculate glyph position within cell
-        let glyph_x = cell_x + (glyph.metrics.xmin as f32 / self.viewport_width * 2.0);
-        let glyph_y = cell_y - ((self.cell_height - glyph.metrics.ymin as f32 - glyph.height as f32) / self.viewport_height * 2.0);
-        let glyph_w = glyph.width as f32 / self.viewport_width * 2.0;
-        let glyph_h = glyph.height as f32 / self.viewport_height * 2.0;
+        // Handle cursor
+        if cursor_here {
+            bg = *cursor_color;
+            // Make fg visible against cursor
+            fg = *default_bg;
+        }
 
-        // Texture coordinates
-        let tx0 = glyph.atlas_x as f32 / atlas_size;
-        let ty0 = glyph.atlas_y as f32 / atlas_size;
-        let tx1 = (glyph.atlas_x + glyph.width) as f32 / atlas_size;
-        let ty1 = (glyph.atlas_y + glyph.height) as f32 / atlas_size;
+        // Handle dim
+        if cell.flags.contains(CellFlags::DIM) {
+            fg = Color::rgb(fg.r / 2, fg.g / 2, fg.b / 2);
+        }
 
+        // Handle hidden
+        if cell.flags.contains(CellFlags::HIDDEN) {
+            fg = bg;
+        }
+
+        let fg_arr = Self::color_to_array(&fg);
+        let bg_arr = Self::color_to_array(&bg);
+
+        // Render background quad
         let base_idx = vertices.len() as u32;
 
+        let x0 = self.to_clip_x(x);
+        let y0 = self.to_clip_y(y);
+        let x1 = self.to_clip_x(x + cell_w);
+        let y1 = self.to_clip_y(y + self.cell_height);
+
+        // Background vertices (using UV 0,0 for solid color)
         vertices.push(Vertex {
-            position: [glyph_x, glyph_y],
-            tex_coords: [tx0, ty0],
-            color: fg,
-            bg_color: bg,
+            position: [x0, y0],
+            tex_coords: [0.0, 0.0],
+            color: fg_arr,
+            bg_color: bg_arr,
         });
         vertices.push(Vertex {
-            position: [glyph_x + glyph_w, glyph_y],
-            tex_coords: [tx1, ty0],
-            color: fg,
-            bg_color: bg,
+            position: [x1, y0],
+            tex_coords: [0.0, 0.0],
+            color: fg_arr,
+            bg_color: bg_arr,
         });
         vertices.push(Vertex {
-            position: [glyph_x + glyph_w, glyph_y - glyph_h],
-            tex_coords: [tx1, ty1],
-            color: fg,
-            bg_color: bg,
+            position: [x1, y1],
+            tex_coords: [0.0, 0.0],
+            color: fg_arr,
+            bg_color: bg_arr,
         });
         vertices.push(Vertex {
-            position: [glyph_x, glyph_y - glyph_h],
-            tex_coords: [tx0, ty1],
-            color: fg,
-            bg_color: bg,
+            position: [x0, y1],
+            tex_coords: [0.0, 0.0],
+            color: fg_arr,
+            bg_color: bg_arr,
         });
 
         indices.extend_from_slice(&[
             base_idx, base_idx + 1, base_idx + 2,
             base_idx, base_idx + 2, base_idx + 3,
         ]);
+
+        // Render glyph if not a space
+        if cell.c != ' ' && cell.c != '\0' {
+            self.render_glyph(col, row, cell, fg_arr, bg_arr, vertices, indices);
+        }
+
+        // Render underline
+        if cell.flags.contains(CellFlags::UNDERLINE) {
+            self.render_underline(x, y, cell_w, fg_arr, bg_arr, vertices, indices);
+        }
+
+        // Render strikethrough
+        if cell.flags.contains(CellFlags::STRIKETHROUGH) {
+            self.render_strikethrough(x, y, cell_w, fg_arr, bg_arr, vertices, indices);
+        }
     }
 
-    /// Render cursor
-    fn render_cursor(
-        &self,
-        vertices: &mut Vec<Vertex>,
-        indices: &mut Vec<u32>,
+    /// Render a glyph
+    fn render_glyph(
+        &mut self,
         col: u16,
         row: u16,
+        cell: &Cell,
+        fg: [f32; 4],
+        bg: [f32; 4],
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
     ) {
-        let x = self.col_to_ndc(col as f32);
-        let y = self.row_to_ndc(row as f32);
-        let w = self.cell_width / self.viewport_width * 2.0;
-        let h = self.cell_height / self.viewport_height * 2.0;
+        let flags = Self::glyph_flags(cell.flags);
+        let key = GlyphKey::new(cell.c, flags);
 
-        // Cursor color (white, semi-transparent)
-        let cursor_color = [1.0, 1.0, 1.0, 0.7];
-        let bg = [0.0, 0.0, 0.0, 0.0];
+        // Cache glyph if needed - we need to handle the borrow carefully
+        // First check if cached, then rasterize if needed
+        let glyph_info = if let Some(info) = self.atlas.get(&key) {
+            *info
+        } else {
+            // Rasterize using the appropriate font
+            let rasterized = if cell.flags.contains(CellFlags::BOLD) {
+                self.bold_font.as_ref().unwrap_or(&self.font).rasterize(cell.c)
+            } else if cell.flags.contains(CellFlags::ITALIC) {
+                self.italic_font.as_ref().unwrap_or(&self.font).rasterize(cell.c)
+            } else {
+                self.font.rasterize(cell.c)
+            };
+
+            // Now cache it
+            match self.atlas.cache_rasterized(key, rasterized) {
+                Some(info) => info,
+                None => return, // Atlas full
+            }
+        };
+
+        if glyph_info.width == 0 || glyph_info.height == 0 {
+            return; // Empty glyph (space)
+        }
+
+        // Calculate glyph position
+        let cell_x = col as f32 * self.cell_width;
+        let cell_y = row as f32 * self.cell_height;
+
+        let glyph_x = cell_x + glyph_info.metrics.xmin as f32;
+        let glyph_y = cell_y + self.ascent - glyph_info.metrics.ymin as f32 - glyph_info.height as f32;
+
+        let x0 = self.to_clip_x(glyph_x);
+        let y0 = self.to_clip_y(glyph_y);
+        let x1 = self.to_clip_x(glyph_x + glyph_info.width as f32);
+        let y1 = self.to_clip_y(glyph_y + glyph_info.height as f32);
+
+        // Calculate UV coordinates
+        let (atlas_w, atlas_h) = self.atlas.size();
+        let u0 = glyph_info.atlas_x as f32 / atlas_w as f32;
+        let v0 = glyph_info.atlas_y as f32 / atlas_h as f32;
+        let u1 = (glyph_info.atlas_x + glyph_info.width) as f32 / atlas_w as f32;
+        let v1 = (glyph_info.atlas_y + glyph_info.height) as f32 / atlas_h as f32;
 
         let base_idx = vertices.len() as u32;
 
-        // Block cursor
         vertices.push(Vertex {
-            position: [x, y],
-            tex_coords: [0.0, 0.0],
-            color: cursor_color,
+            position: [x0, y0],
+            tex_coords: [u0, v0],
+            color: fg,
             bg_color: bg,
         });
         vertices.push(Vertex {
-            position: [x + w, y],
-            tex_coords: [0.0, 0.0],
-            color: cursor_color,
+            position: [x1, y0],
+            tex_coords: [u1, v0],
+            color: fg,
             bg_color: bg,
         });
         vertices.push(Vertex {
-            position: [x + w, y - h],
-            tex_coords: [0.0, 0.0],
-            color: cursor_color,
+            position: [x1, y1],
+            tex_coords: [u1, v1],
+            color: fg,
             bg_color: bg,
         });
         vertices.push(Vertex {
-            position: [x, y - h],
-            tex_coords: [0.0, 0.0],
-            color: cursor_color,
+            position: [x0, y1],
+            tex_coords: [u0, v1],
+            color: fg,
             bg_color: bg,
         });
 
@@ -295,37 +363,108 @@ impl TextRenderer {
         ]);
     }
 
-    /// Convert column to NDC x coordinate
-    fn col_to_ndc(&self, col: f32) -> f32 {
-        (col * self.cell_width / self.viewport_width) * 2.0 - 1.0
+    /// Render underline decoration
+    fn render_underline(
+        &mut self,
+        x: f32,
+        y: f32,
+        width: f32,
+        fg: [f32; 4],
+        bg: [f32; 4],
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+    ) {
+        let line_y = y + self.cell_height - 2.0;
+        let line_height = 1.0;
+
+        let x0 = self.to_clip_x(x);
+        let y0 = self.to_clip_y(line_y);
+        let x1 = self.to_clip_x(x + width);
+        let y1 = self.to_clip_y(line_y + line_height);
+
+        let base_idx = vertices.len() as u32;
+
+        vertices.push(Vertex { position: [x0, y0], tex_coords: [0.0, 0.0], color: fg, bg_color: bg });
+        vertices.push(Vertex { position: [x1, y0], tex_coords: [0.0, 0.0], color: fg, bg_color: bg });
+        vertices.push(Vertex { position: [x1, y1], tex_coords: [0.0, 0.0], color: fg, bg_color: bg });
+        vertices.push(Vertex { position: [x0, y1], tex_coords: [0.0, 0.0], color: fg, bg_color: bg });
+
+        indices.extend_from_slice(&[
+            base_idx, base_idx + 1, base_idx + 2,
+            base_idx, base_idx + 2, base_idx + 3,
+        ]);
     }
 
-    /// Convert row to NDC y coordinate (top = 1, bottom = -1)
-    fn row_to_ndc(&self, row: f32) -> f32 {
-        1.0 - (row * self.cell_height / self.viewport_height) * 2.0
+    /// Render strikethrough decoration
+    fn render_strikethrough(
+        &mut self,
+        x: f32,
+        y: f32,
+        width: f32,
+        fg: [f32; 4],
+        bg: [f32; 4],
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+    ) {
+        let line_y = y + self.cell_height / 2.0;
+        let line_height = 1.0;
+
+        let x0 = self.to_clip_x(x);
+        let y0 = self.to_clip_y(line_y);
+        let x1 = self.to_clip_x(x + width);
+        let y1 = self.to_clip_y(line_y + line_height);
+
+        let base_idx = vertices.len() as u32;
+
+        vertices.push(Vertex { position: [x0, y0], tex_coords: [0.0, 0.0], color: fg, bg_color: bg });
+        vertices.push(Vertex { position: [x1, y0], tex_coords: [0.0, 0.0], color: fg, bg_color: bg });
+        vertices.push(Vertex { position: [x1, y1], tex_coords: [0.0, 0.0], color: fg, bg_color: bg });
+        vertices.push(Vertex { position: [x0, y1], tex_coords: [0.0, 0.0], color: fg, bg_color: bg });
+
+        indices.extend_from_slice(&[
+            base_idx, base_idx + 1, base_idx + 2,
+            base_idx, base_idx + 2, base_idx + 3,
+        ]);
     }
 
-    /// Convert cell flags to glyph flags
-    fn cell_flags_to_glyph_flags(&self, flags: &CellFlags) -> u8 {
-        let mut glyph_flags = 0u8;
-        if flags.contains(CellFlags::BOLD) {
-            glyph_flags |= 1;
+    /// Render entire grid
+    pub fn render_grid(
+        &mut self,
+        grid: &Grid,
+        cursor: &Cursor,
+        selection: &SelectionManager,
+        colors: &ColorScheme,
+    ) -> (Vec<Vertex>, Vec<u32>) {
+        let mut vertices = Vec::with_capacity(grid.cols() as usize * grid.lines() as usize * 8);
+        let mut indices = Vec::with_capacity(grid.cols() as usize * grid.lines() as usize * 12);
+
+        let default_fg = Self::parse_hex_color(&colors.foreground);
+        let default_bg = Self::parse_hex_color(&colors.background);
+        let cursor_color = Self::parse_hex_color(&colors.cursor);
+
+        for row in 0..grid.lines() {
+            for col in 0..grid.cols() {
+                let cell = grid.cell(col, row);
+                let cursor_here = cursor.visible && cursor.col == col && cursor.line == row;
+                let selected = selection.is_selected(col, row);
+
+                self.render_cell(
+                    col,
+                    row,
+                    cell,
+                    cursor_here,
+                    selected,
+                    &default_fg,
+                    &default_bg,
+                    &cursor_color,
+                    &mut vertices,
+                    &mut indices,
+                );
+            }
         }
-        if flags.contains(CellFlags::ITALIC) {
-            glyph_flags |= 2;
-        }
-        glyph_flags
-    }
-}
 
-/// Convert color to float array
-fn color_to_array(color: &Color) -> [f32; 4] {
-    [
-        color.r as f32 / 255.0,
-        color.g as f32 / 255.0,
-        color.b as f32 / 255.0,
-        1.0,
-    ]
+        (vertices, indices)
+    }
 }
 
 #[cfg(test)]
@@ -333,88 +472,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn text_renderer_new() {
-        let renderer = TextRenderer::new(512);
-        assert_eq!(renderer.atlas().size(), (512, 512));
+    fn parse_hex_color_valid() {
+        let color = TextRenderer::parse_hex_color("#ff0000");
+        assert_eq!(color.r, 255);
+        assert_eq!(color.g, 0);
+        assert_eq!(color.b, 0);
     }
 
     #[test]
-    fn text_renderer_cell_size() {
-        let renderer = TextRenderer::new(512);
-        let (w, h) = renderer.cell_size();
-        assert!(w > 0.0);
-        assert!(h > 0.0);
+    fn parse_hex_color_no_hash() {
+        let color = TextRenderer::parse_hex_color("00ff00");
+        assert_eq!(color.r, 0);
+        assert_eq!(color.g, 255);
+        assert_eq!(color.b, 0);
     }
 
     #[test]
-    fn text_renderer_viewport() {
-        let mut renderer = TextRenderer::new(512);
-        renderer.set_viewport(1024.0, 768.0);
-        assert_eq!(renderer.viewport_width, 1024.0);
-        assert_eq!(renderer.viewport_height, 768.0);
+    fn glyph_flags_none() {
+        let flags = TextRenderer::glyph_flags(CellFlags::empty());
+        assert_eq!(flags, 0);
     }
 
     #[test]
-    fn text_renderer_col_to_ndc() {
-        let renderer = TextRenderer::new(512);
-        // At col 0, should be at left edge (-1)
-        let x = renderer.col_to_ndc(0.0);
-        assert!((x - (-1.0)).abs() < 0.01);
+    fn glyph_flags_bold() {
+        let flags = TextRenderer::glyph_flags(CellFlags::BOLD);
+        assert_eq!(flags, 1);
     }
 
     #[test]
-    fn text_renderer_row_to_ndc() {
-        let renderer = TextRenderer::new(512);
-        // At row 0, should be at top edge (1)
-        let y = renderer.row_to_ndc(0.0);
-        assert!((y - 1.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn text_renderer_render_empty_grid() {
-        let mut renderer = TextRenderer::new(512);
-        let grid = Grid::new(10, 5, 100);
-
-        let (vertices, indices) = renderer.render_grid(&grid, 0, 0, false);
-
-        // Should have vertices for each cell (4 per cell, 10x5 = 50 cells)
-        assert_eq!(vertices.len(), 50 * 4);
-        // 6 indices per quad
-        assert_eq!(indices.len(), 50 * 6);
-    }
-
-    #[test]
-    fn text_renderer_render_with_cursor() {
-        let mut renderer = TextRenderer::new(512);
-        let grid = Grid::new(10, 5, 100);
-
-        let (vertices, indices) = renderer.render_grid(&grid, 5, 2, true);
-
-        // 50 cells + 1 cursor = 51 quads
-        assert_eq!(vertices.len(), 51 * 4);
-        assert_eq!(indices.len(), 51 * 6);
-    }
-
-    #[test]
-    fn text_renderer_atlas_dirty() {
-        let renderer = TextRenderer::new(512);
-        assert!(!renderer.atlas_dirty());
-    }
-
-    #[test]
-    fn cell_flags_to_glyph_flags() {
-        let renderer = TextRenderer::new(512);
-
-        let empty = CellFlags::empty();
-        assert_eq!(renderer.cell_flags_to_glyph_flags(&empty), 0);
-
-        let bold = CellFlags::BOLD;
-        assert_eq!(renderer.cell_flags_to_glyph_flags(&bold), 1);
-
-        let italic = CellFlags::ITALIC;
-        assert_eq!(renderer.cell_flags_to_glyph_flags(&italic), 2);
-
-        let both = CellFlags::BOLD | CellFlags::ITALIC;
-        assert_eq!(renderer.cell_flags_to_glyph_flags(&both), 3);
+    fn glyph_flags_italic() {
+        let flags = TextRenderer::glyph_flags(CellFlags::ITALIC);
+        assert_eq!(flags, 2);
     }
 }

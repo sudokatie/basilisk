@@ -80,6 +80,50 @@ impl Parser {
         }
     }
 
+    /// Advance the parser with a Unicode character
+    /// Returns Some(action) only if in a state that needs special handling
+    /// Returns None if in Ground state (caller should handle printing directly)
+    pub fn advance_char(&mut self, c: char) -> Option<Action> {
+        match self.state {
+            State::Ground => None, // Caller handles printing
+            State::OscString => {
+                // Add character to OSC data
+                let mut buf = [0u8; 4];
+                let s = c.encode_utf8(&mut buf);
+                for &byte in s.as_bytes() {
+                    self.osc_data.push(byte);
+                }
+                None
+            }
+            State::DcsPassthrough => {
+                // Add character to DCS data
+                let mut buf = [0u8; 4];
+                let s = c.encode_utf8(&mut buf);
+                for &byte in s.as_bytes() {
+                    self.dcs_data.push(byte);
+                }
+                None
+            }
+            _ => {
+                // For other states, encode and process bytes
+                let mut buf = [0u8; 4];
+                let s = c.encode_utf8(&mut buf);
+                let mut result = None;
+                for &byte in s.as_bytes() {
+                    if let Some(action) = self.advance(byte) {
+                        result = Some(action);
+                    }
+                }
+                result
+            }
+        }
+    }
+
+    /// Check if parser is in ground state
+    pub fn is_ground(&self) -> bool {
+        self.state == State::Ground
+    }
+
     fn ground(&mut self, byte: u8) -> Option<Action> {
         match byte {
             0x1b => {

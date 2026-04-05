@@ -131,6 +131,28 @@ pub trait Handler {
 
     /// Line feed (may scroll)
     fn linefeed(&mut self);
+
+    /// Set terminal mode (DEC private modes)
+    /// Common modes:
+    /// - 1: DECCKM (application cursor keys)
+    /// - 6: DECOM (origin mode)
+    /// - 7: DECAWM (auto-wrap)
+    /// - 25: DECTCEM (cursor visible)
+    /// - 1000: X10 mouse tracking
+    /// - 1002: Button-event mouse tracking
+    /// - 1003: Any-event mouse tracking
+    /// - 1006: SGR mouse mode
+    /// - 2004: Bracketed paste
+    fn set_mode(&mut self, mode: u16, enable: bool);
+
+    /// Set hyperlink (OSC 8)
+    fn set_hyperlink(&mut self, id: Option<&str>, url: Option<&str>);
+
+    /// Set working directory (OSC 7)
+    fn set_working_directory(&mut self, path: &str);
+
+    /// Clipboard operation (OSC 52)
+    fn clipboard(&mut self, clipboard: char, data: Option<&str>);
 }
 
 #[cfg(test)]

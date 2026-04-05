@@ -59,18 +59,12 @@ pub fn dispatch<H: Handler>(
         // Private modes (CSI ? Ps h/l)
         'h' if private_mode => {
             for &p in params {
-                match p {
-                    25 => handler.set_cursor_visible(true), // DECTCEM
-                    _ => {}
-                }
+                handler.set_mode(p, true);
             }
         }
         'l' if private_mode => {
             for &p in params {
-                match p {
-                    25 => handler.set_cursor_visible(false), // DECTCEM
-                    _ => {}
-                }
+                handler.set_mode(p, false);
             }
         }
 

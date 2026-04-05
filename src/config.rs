@@ -15,6 +15,31 @@ pub struct Config {
     pub scrollback: ScrollbackConfig,
     pub window: WindowConfig,
     pub terminal: TerminalConfig,
+    pub keybinds: KeybindsConfig,
+}
+
+/// Window decoration style
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Decorations {
+    #[default]
+    Full,
+    None,
+    Transparent,
+}
+
+impl<'de> Deserialize<'de> for Decorations {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.to_lowercase().as_str() {
+            "full" => Ok(Decorations::Full),
+            "none" => Ok(Decorations::None),
+            "transparent" => Ok(Decorations::Transparent),
+            _ => Ok(Decorations::Full),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -74,6 +99,53 @@ pub struct TerminalConfig {
     pub rows: u16,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct KeybindsConfig {
+    /// Prefix key for multiplexer commands (e.g., "ctrl+b")
+    pub prefix: String,
+    /// Custom keybindings (action -> key)
+    #[serde(flatten)]
+    pub custom: std::collections::HashMap<String, String>,
+}
+
+impl Default for KeybindsConfig {
+    fn default() -> Self {
+        Self {
+            prefix: "ctrl+b".into(),
+            custom: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl KeybindsConfig {
+    /// Parse the prefix key into modifier and key
+    pub fn parse_prefix(&self) -> Option<(bool, bool, bool, char)> {
+        // Returns (ctrl, alt, shift, key)
+        let parts: Vec<&str> = self.prefix.split('+').collect();
+        if parts.is_empty() {
+            return None;
+        }
+
+        let mut ctrl = false;
+        let mut alt = false;
+        let mut shift = false;
+        let mut key = None;
+
+        for part in parts {
+            match part.to_lowercase().as_str() {
+                "ctrl" | "control" => ctrl = true,
+                "alt" | "meta" | "option" => alt = true,
+                "shift" => shift = true,
+                s if s.len() == 1 => key = s.chars().next(),
+                _ => {}
+            }
+        }
+
+        key.map(|k| (ctrl, alt, shift, k))
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -82,6 +154,7 @@ impl Default for Config {
             scrollback: ScrollbackConfig::default(),
             window: WindowConfig::default(),
             terminal: TerminalConfig::default(),
+            keybinds: KeybindsConfig::default(),
         }
     }
 }

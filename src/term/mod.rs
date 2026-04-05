@@ -12,6 +12,6 @@ pub mod scrollback;
 pub use cell::{Cell, CellFlags, Color};
 pub use grid::{Grid, Row};
 pub use cursor::{Cursor, CursorShape, SavedCursor};
-pub use terminal::Terminal;
+pub use terminal::{Terminal, TerminalModes, MouseMode, SixelPlacement, Hyperlink};
 pub use selection::{Selection, SelectionManager, SelectionType, Point};
 pub use scrollback::{ScrollbackView, VisibleRange};

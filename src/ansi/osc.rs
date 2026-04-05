@@ -371,6 +371,10 @@ mod tests {
         fn set_cursor_visible(&mut self, _visible: bool) {}
         fn reverse_index(&mut self) {}
         fn linefeed(&mut self) {}
+        fn set_mode(&mut self, _mode: u16, _enable: bool) {}
+        fn set_hyperlink(&mut self, _id: Option<&str>, _url: Option<&str>) {}
+        fn set_working_directory(&mut self, _path: &str) {}
+        fn clipboard(&mut self, _clipboard: char, _data: Option<&str>) {}
     }
 
     #[test]

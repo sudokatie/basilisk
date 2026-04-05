@@ -243,6 +243,10 @@ mod tests {
         fn set_cursor_visible(&mut self, visible: bool) { self.log(&format!("cursor_visible:{}", visible)); }
         fn reverse_index(&mut self) { self.log("reverse_index"); }
         fn linefeed(&mut self) { self.log("linefeed"); }
+        fn set_mode(&mut self, mode: u16, enable: bool) { self.log(&format!("set_mode:{}:{}", mode, enable)); }
+        fn set_hyperlink(&mut self, id: Option<&str>, url: Option<&str>) { self.log(&format!("hyperlink:{:?}:{:?}", id, url)); }
+        fn set_working_directory(&mut self, path: &str) { self.log(&format!("cwd:{}", path)); }
+        fn clipboard(&mut self, clipboard: char, data: Option<&str>) { self.log(&format!("clipboard:{}:{:?}", clipboard, data)); }
     }
 
     #[test]
@@ -353,11 +357,11 @@ mod tests {
     #[test]
     fn csi_cursor_visibility() {
         let mut h = MockHandler::new();
-        dispatch(&mut h, &[25], &[b'?'], 'l'); // Hide cursor
-        assert!(h.has_call("cursor_visible:false"));
+        dispatch(&mut h, &[25], &[b'?'], 'l'); // Hide cursor (DECTCEM)
+        assert!(h.has_call("set_mode:25:false"));
 
-        dispatch(&mut h, &[25], &[b'?'], 'h'); // Show cursor
-        assert!(h.has_call("cursor_visible:true"));
+        dispatch(&mut h, &[25], &[b'?'], 'h'); // Show cursor (DECTCEM)
+        assert!(h.has_call("set_mode:25:true"));
     }
 
     #[test]

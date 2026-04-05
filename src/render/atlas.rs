@@ -508,7 +508,9 @@ mod tests {
         // First allocation should succeed
         let pos1 = atlas.allocate(32, 32);
         assert!(pos1.is_some());
-        assert_eq!(pos1.unwrap(), (0, 0));
+        let (x1, y1, page1) = pos1.unwrap();
+        assert_eq!((x1, y1), (0, 0));
+        assert_eq!(page1, 0);
 
         // Second allocation in same row
         let pos2 = atlas.allocate(32, 32);

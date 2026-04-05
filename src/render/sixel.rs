@@ -533,7 +533,8 @@ mod tests {
     fn decoder_color_definition() {
         let mut decoder = SixelDecoder::new();
         // #100;2;100;0;0 defines color 100 as RGB red
-        decoder.decode(b"#100;2;100;0;0");
+        // Need a sixel char at end to terminate color def
+        decoder.decode(b"#100;2;100;0;0?");
         let color = decoder.palette.get(&100);
         assert!(color.is_some());
         let color = color.unwrap();
@@ -580,7 +581,8 @@ mod tests {
     fn decoder_raster_attributes() {
         let mut decoder = SixelDecoder::new();
         // "1;1;100;50 sets aspect 1:1, size 100x50
-        decoder.decode(b"\"1;1;100;50");
+        // Need a sixel char at end to terminate raster def
+        decoder.decode(b"\"1;1;100;50?");
         assert_eq!(decoder.image.width, 100);
         assert_eq!(decoder.image.height, 50);
     }

@@ -1,6 +1,10 @@
 //! Cursor state and movement
 
+use std::time::{Duration, Instant};
 use super::cell::{Color, CellFlags};
+
+/// Default blink interval in milliseconds
+const DEFAULT_BLINK_INTERVAL_MS: u64 = 530;
 
 /// Cursor shape
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -9,6 +13,73 @@ pub enum CursorShape {
     Block,
     Underline,
     Beam,
+}
+
+/// Cursor blink state
+#[derive(Clone, Debug)]
+pub struct CursorBlink {
+    /// Whether blinking is enabled for the cursor
+    pub enabled: bool,
+    /// Current visibility state (toggled by timer)
+    pub visible: bool,
+    /// Blink interval
+    pub interval: Duration,
+    /// Last toggle time
+    pub last_toggle: Instant,
+}
+
+impl Default for CursorBlink {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            visible: true,
+            interval: Duration::from_millis(DEFAULT_BLINK_INTERVAL_MS),
+            last_toggle: Instant::now(),
+        }
+    }
+}
+
+impl CursorBlink {
+    /// Create new blink state with blinking enabled
+    pub fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            ..Default::default()
+        }
+    }
+
+    /// Update blink state based on elapsed time
+    /// Returns true if visibility changed
+    pub fn update(&mut self) -> bool {
+        if !self.enabled {
+            // Ensure visible when blinking disabled
+            if !self.visible {
+                self.visible = true;
+                return true;
+            }
+            return false;
+        }
+
+        let now = Instant::now();
+        if now.duration_since(self.last_toggle) >= self.interval {
+            self.visible = !self.visible;
+            self.last_toggle = now;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Reset blink state (make visible and reset timer)
+    pub fn reset(&mut self) {
+        self.visible = true;
+        self.last_toggle = Instant::now();
+    }
+
+    /// Check if cursor should be drawn (considering blink state)
+    pub fn should_draw(&self) -> bool {
+        !self.enabled || self.visible
+    }
 }
 
 /// Saved cursor state for ESC 7 / ESC 8
@@ -31,6 +102,7 @@ pub struct Cursor {
     pub flags: CellFlags,
     pub visible: bool,
     pub shape: CursorShape,
+    pub blink: CursorBlink,
 }
 
 impl Default for Cursor {
@@ -49,7 +121,42 @@ impl Cursor {
             flags: CellFlags::empty(),
             visible: true,
             shape: CursorShape::Block,
+            blink: CursorBlink::default(),
         }
+    }
+
+    /// Set cursor shape from DECSCUSR parameter
+    /// 0, 1 = blink block, 2 = steady block
+    /// 3 = blink underline, 4 = steady underline
+    /// 5 = blink bar, 6 = steady bar
+    pub fn set_shape_decscusr(&mut self, param: u16) {
+        let (shape, blink) = match param {
+            0 | 1 => (CursorShape::Block, true),
+            2 => (CursorShape::Block, false),
+            3 => (CursorShape::Underline, true),
+            4 => (CursorShape::Underline, false),
+            5 => (CursorShape::Beam, true),
+            6 => (CursorShape::Beam, false),
+            _ => (CursorShape::Block, true), // Default
+        };
+        self.shape = shape;
+        self.blink.enabled = blink;
+        self.blink.reset();
+    }
+
+    /// Check if cursor should be drawn (considering visibility and blink)
+    pub fn should_draw(&self) -> bool {
+        self.visible && self.blink.should_draw()
+    }
+
+    /// Update blink state
+    pub fn update_blink(&mut self) -> bool {
+        self.blink.update()
+    }
+
+    /// Reset blink timer (call on keypress)
+    pub fn reset_blink(&mut self) {
+        self.blink.reset();
     }
 
     pub fn move_to(&mut self, col: u16, line: u16) {

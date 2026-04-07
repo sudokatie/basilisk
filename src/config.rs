@@ -233,6 +233,98 @@ impl Config {
     pub fn default_path() -> PathBuf {
         dirs_path().join("config.toml")
     }
+
+    /// Reload config from disk, returning only if changed
+    pub fn reload(path: &Path, current: &Self) -> Option<Self> {
+        match Self::load(path) {
+            Ok(new_config) => {
+                // Check if anything relevant changed
+                if new_config.colors != current.colors
+                    || new_config.font != current.font
+                    || new_config.window.opacity != current.window.opacity
+                {
+                    Some(new_config)
+                } else {
+                    None
+                }
+            }
+            Err(_) => None,
+        }
+    }
+}
+
+// Implement PartialEq for ColorScheme to detect changes
+impl PartialEq for ColorScheme {
+    fn eq(&self, other: &Self) -> bool {
+        self.foreground == other.foreground
+            && self.background == other.background
+            && self.cursor == other.cursor
+            && self.black == other.black
+            && self.red == other.red
+            && self.green == other.green
+            && self.yellow == other.yellow
+            && self.blue == other.blue
+            && self.magenta == other.magenta
+            && self.cyan == other.cyan
+            && self.white == other.white
+    }
+}
+
+impl PartialEq for FontConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.family == other.family
+            && (self.size - other.size).abs() < 0.01
+            && self.bold_font == other.bold_font
+            && self.italic_font == other.italic_font
+    }
+}
+
+use std::sync::mpsc;
+use notify::{Watcher, RecursiveMode, Event, EventKind};
+
+/// Config file watcher for hot reload
+pub struct ConfigWatcher {
+    _watcher: notify::RecommendedWatcher,
+    rx: mpsc::Receiver<std::result::Result<Event, notify::Error>>,
+    config_path: PathBuf,
+}
+
+impl ConfigWatcher {
+    /// Create a new config watcher for the given path
+    pub fn new(config_path: PathBuf) -> Result<Self> {
+        let (tx, rx) = mpsc::channel();
+
+        let mut watcher = notify::recommended_watcher(move |res| {
+            let _ = tx.send(res);
+        }).map_err(|e| crate::Error::Config(e.to_string()))?;
+
+        // Watch the config file's parent directory to catch recreations
+        if let Some(parent) = config_path.parent() {
+            watcher.watch(parent, RecursiveMode::NonRecursive)
+                .map_err(|e| crate::Error::Config(e.to_string()))?;
+        }
+
+        Ok(Self {
+            _watcher: watcher,
+            rx,
+            config_path,
+        })
+    }
+
+    /// Check if config file was modified (non-blocking)
+    pub fn check_modified(&self) -> bool {
+        while let Ok(Ok(event)) = self.rx.try_recv() {
+            // Check if the event is for our config file
+            if let EventKind::Modify(_) | EventKind::Create(_) = event.kind {
+                for path in event.paths {
+                    if path == self.config_path {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
 }
 
 fn dirs_path() -> PathBuf {

@@ -97,6 +97,50 @@ impl Grid {
         }
     }
 
+    /// Scroll up within a region (for scroll regions)
+    pub fn scroll_region_up(&mut self, top: u16, bottom: u16, amount: usize) {
+        let top = top as usize;
+        let bottom = bottom as usize;
+        
+        if top >= bottom || bottom >= self.rows.len() {
+            return;
+        }
+
+        for _ in 0..amount {
+            // Remove the top row of the region
+            let row = self.rows.remove(top);
+            
+            // If scrolling the full screen from top, save to scrollback
+            if top == 0 {
+                if self.scrollback.len() >= self.scrollback_limit {
+                    self.scrollback.pop_front();
+                }
+                self.scrollback.push_back(row);
+            }
+            
+            // Insert a new blank row at the bottom of the region
+            self.rows.insert(bottom, Row::new(self.cols as usize));
+        }
+    }
+
+    /// Scroll down within a region (for scroll regions)
+    pub fn scroll_region_down(&mut self, top: u16, bottom: u16, amount: usize) {
+        let top = top as usize;
+        let bottom = bottom as usize;
+        
+        if top >= bottom || bottom >= self.rows.len() {
+            return;
+        }
+
+        for _ in 0..amount {
+            // Remove the bottom row of the region
+            self.rows.remove(bottom);
+            
+            // Insert a new blank row at the top of the region
+            self.rows.insert(top, Row::new(self.cols as usize));
+        }
+    }
+
     pub fn scroll_down(&mut self, amount: usize) {
         for _ in 0..amount {
             if let Some(row) = self.scrollback.pop_back() {

@@ -2,11 +2,9 @@
 //!
 //! Uses Unix domain sockets for client-server communication.
 
-use std::io::{Read, Write, BufRead, BufReader};
+use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use std::sync::mpsc;
-use std::thread;
 
 use crate::{Error, Result};
 
@@ -137,9 +135,15 @@ impl SessionServer {
     }
 
     /// Accept a client connection (blocking)
-    pub fn accept(&self) -> Result<SessionClient> {
+    pub fn accept(&self) -> Result<UnixStream> {
         let (stream, _) = self.listener.accept()
             .map_err(|e| Error::Io(e))?;
+        Ok(stream)
+    }
+
+    /// Accept a client connection as SessionClient (blocking)
+    pub fn accept_client(&self) -> Result<SessionClient> {
+        let stream = self.accept()?;
         Ok(SessionClient { stream })
     }
 

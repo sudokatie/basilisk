@@ -87,7 +87,8 @@ pub struct Atlas {
     lru: Vec<LruEntry>,
     /// Current frame number for LRU
     frame: u64,
-    /// Maximum rows before eviction is triggered
+    /// Maximum rows before eviction is triggered (reserved for atlas expansion)
+    #[allow(dead_code)]
     max_rows: usize,
 }
 
@@ -351,7 +352,7 @@ impl Atlas {
     }
 
     /// Allocate space for a glyph in a specific row
-    fn allocate_in_row(&mut self, row_idx: usize, width: u32, height: u32) -> Option<(u32, u32)> {
+    fn allocate_in_row(&mut self, row_idx: usize, width: u32, _height: u32) -> Option<(u32, u32)> {
         let padded_width = width + self.padding;
 
         if row_idx >= self.rows.len() {
@@ -434,6 +435,175 @@ impl Atlas {
     /// Get number of cached glyphs
     pub fn glyph_count(&self) -> usize {
         self.glyphs.len()
+    }
+}
+
+/// Information about a cached color glyph (emoji) in the color atlas
+#[derive(Debug, Clone, Copy)]
+pub struct ColorGlyphInfo {
+    /// X position in atlas texture (pixels)
+    pub atlas_x: u32,
+    /// Y position in atlas texture (pixels)
+    pub atlas_y: u32,
+    /// Width in pixels
+    pub width: u32,
+    /// Height in pixels
+    pub height: u32,
+    /// Advance width for positioning
+    pub advance_width: f32,
+}
+
+/// RGBA color atlas for emoji and color glyphs
+pub struct ColorAtlas {
+    /// Atlas texture data (RGBA, 4 bytes per pixel)
+    data: Vec<u8>,
+    /// Atlas width in pixels
+    width: u32,
+    /// Atlas height in pixels
+    height: u32,
+    /// Cached glyph locations
+    glyphs: HashMap<char, ColorGlyphInfo>,
+    /// Current Y position for allocation
+    current_y: u32,
+    /// Current X position for allocation
+    current_x: u32,
+    /// Current row height
+    row_height: u32,
+    /// Padding between glyphs
+    padding: u32,
+    /// Whether atlas data changed and needs GPU upload
+    dirty: bool,
+}
+
+impl ColorAtlas {
+    /// Create a new color atlas with given dimensions
+    pub fn new(width: u32, height: u32) -> Self {
+        Self {
+            data: vec![0; (width * height * 4) as usize],
+            width,
+            height,
+            glyphs: HashMap::new(),
+            current_y: 0,
+            current_x: 0,
+            row_height: 0,
+            padding: 1,
+            dirty: false,
+        }
+    }
+
+    /// Get atlas dimensions
+    pub fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    /// Get atlas texture data (RGBA)
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    /// Check if atlas needs GPU upload
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// Mark atlas as uploaded
+    pub fn mark_clean(&mut self) {
+        self.dirty = false;
+    }
+
+    /// Look up a cached color glyph
+    pub fn get(&self, c: char) -> Option<&ColorGlyphInfo> {
+        self.glyphs.get(&c)
+    }
+
+    /// Cache a color glyph with RGBA data
+    pub fn cache_rgba(
+        &mut self,
+        c: char,
+        rgba_data: &[u8],
+        width: u32,
+        height: u32,
+        advance_width: f32,
+    ) -> Option<ColorGlyphInfo> {
+        // Check if already cached
+        if let Some(info) = self.glyphs.get(&c) {
+            return Some(*info);
+        }
+
+        if width == 0 || height == 0 {
+            return None;
+        }
+
+        // Allocate space
+        let padded_width = width + self.padding;
+        let padded_height = height + self.padding;
+
+        // Check if fits in current row
+        if self.current_x + padded_width > self.width {
+            // Move to next row
+            self.current_y += self.row_height;
+            self.current_x = 0;
+            self.row_height = 0;
+        }
+
+        // Check if fits vertically
+        if self.current_y + padded_height > self.height {
+            // Atlas full
+            return None;
+        }
+
+        let x = self.current_x;
+        let y = self.current_y;
+
+        // Update allocation position
+        self.current_x += padded_width;
+        self.row_height = self.row_height.max(padded_height);
+
+        // Copy RGBA data to atlas
+        for row in 0..height {
+            let src_start = (row * width * 4) as usize;
+            let src_end = src_start + (width * 4) as usize;
+            let dst_start = (((y + row) * self.width + x) * 4) as usize;
+
+            if dst_start + (width * 4) as usize <= self.data.len() && src_end <= rgba_data.len() {
+                self.data[dst_start..dst_start + (width * 4) as usize]
+                    .copy_from_slice(&rgba_data[src_start..src_end]);
+            }
+        }
+
+        let info = ColorGlyphInfo {
+            atlas_x: x,
+            atlas_y: y,
+            width,
+            height,
+            advance_width,
+        };
+
+        self.glyphs.insert(c, info);
+        self.dirty = true;
+
+        Some(info)
+    }
+
+    /// Clear the atlas
+    pub fn clear(&mut self) {
+        self.data.fill(0);
+        self.glyphs.clear();
+        self.current_x = 0;
+        self.current_y = 0;
+        self.row_height = 0;
+        self.dirty = true;
+    }
+
+    /// Get number of cached glyphs
+    pub fn glyph_count(&self) -> usize {
+        self.glyphs.len()
+    }
+}
+
+impl Default for ColorAtlas {
+    fn default() -> Self {
+        Self::new(1024, 1024)
     }
 }
 

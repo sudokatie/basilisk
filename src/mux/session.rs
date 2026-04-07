@@ -1,12 +1,36 @@
 //! Session - a collection of windows
 
+use std::path::PathBuf;
+use serde::{Serialize, Deserialize};
 use super::window::{Window, WindowId, SplitDirection};
 use super::pane::{Pane, PaneId};
 use crate::Result;
 
 /// Unique identifier for a session
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub u32);
+
+/// Serializable session state for persistence
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SessionState {
+    /// Session ID
+    pub id: u32,
+    /// Session name
+    pub name: String,
+    /// Number of windows
+    pub window_count: usize,
+    /// Window names
+    pub window_names: Vec<String>,
+    /// Active window index
+    pub active_window_idx: usize,
+    /// Default shell
+    pub shell: String,
+    /// Default dimensions
+    pub cols: u16,
+    pub rows: u16,
+    /// Scrollback lines
+    pub scrollback: usize,
+}
 
 impl SessionId {
     pub fn new(id: u32) -> Self {
@@ -274,6 +298,103 @@ impl Session {
     /// Check if all windows are closed
     pub fn is_empty(&self) -> bool {
         self.windows.is_empty()
+    }
+
+    /// Get session socket directory
+    pub fn socket_dir() -> PathBuf {
+        let base = std::env::var("XDG_RUNTIME_DIR")
+            .unwrap_or_else(|_| "/tmp".into());
+        PathBuf::from(base).join("basilisk")
+    }
+
+    /// Get session state file path
+    pub fn state_path(&self) -> PathBuf {
+        Self::socket_dir().join(format!("session-{}.json", self.id.0))
+    }
+
+    /// Convert to serializable state
+    pub fn to_state(&self) -> SessionState {
+        SessionState {
+            id: self.id.0,
+            name: self.name.clone(),
+            window_count: self.windows.len(),
+            window_names: self.windows.iter().map(|w| w.name().to_string()).collect(),
+            active_window_idx: self.active_window_idx,
+            shell: self.default_shell.clone(),
+            cols: self.default_cols,
+            rows: self.default_rows,
+            scrollback: self.scrollback,
+        }
+    }
+
+    /// Save session state to disk
+    pub fn save_state(&self) -> Result<()> {
+        let dir = Self::socket_dir();
+        std::fs::create_dir_all(&dir)?;
+
+        let state = self.to_state();
+        let json = serde_json::to_string_pretty(&state)
+            .map_err(|e| crate::Error::Config(e.to_string()))?;
+        
+        std::fs::write(self.state_path(), json)?;
+        Ok(())
+    }
+
+    /// Load session state from disk
+    pub fn load_state(session_id: u32) -> Result<SessionState> {
+        let path = Self::socket_dir().join(format!("session-{}.json", session_id));
+        let content = std::fs::read_to_string(path)?;
+        serde_json::from_str(&content)
+            .map_err(|e| crate::Error::Config(e.to_string()))
+    }
+
+    /// Restore session from saved state
+    pub fn from_state(state: SessionState) -> Result<Self> {
+        let mut session = Self::new(SessionId::new(state.id), state.name);
+        session.default_shell = state.shell;
+        session.default_cols = state.cols;
+        session.default_rows = state.rows;
+        session.scrollback = state.scrollback;
+
+        // Create windows based on saved names
+        for name in state.window_names {
+            session.create_window_with_shell(name)?;
+        }
+
+        // Restore active window
+        session.set_active_window(state.active_window_idx);
+
+        Ok(session)
+    }
+
+    /// List saved sessions
+    pub fn list_saved() -> Vec<SessionState> {
+        let dir = Self::socket_dir();
+        let mut sessions = Vec::new();
+
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("json") {
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        if let Ok(state) = serde_json::from_str::<SessionState>(&content) {
+                            sessions.push(state);
+                        }
+                    }
+                }
+            }
+        }
+
+        sessions
+    }
+
+    /// Delete saved session state
+    pub fn delete_state(&self) -> Result<()> {
+        let path = self.state_path();
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+        Ok(())
     }
 
     /// Find pane by ID across all windows

@@ -72,6 +72,43 @@ pub fn dispatch<H: Handler>(
         's' => handler.save_cursor(),
         'u' => handler.restore_cursor(),
 
+        // Cursor shape (DECSCUSR) - CSI Ps SP q
+        'q' if intermediates.first() == Some(&b' ') => {
+            let shape = params.first().copied().unwrap_or(0);
+            handler.set_cursor_shape(shape);
+        }
+
+        // Device Attributes (DA)
+        'c' => {
+            if private_mode {
+                // CSI > c - Secondary Device Attributes
+                handler.secondary_device_attributes();
+            } else if intermediates.first() == Some(&b'=') {
+                // CSI = c - Tertiary Device Attributes
+                handler.tertiary_device_attributes();
+            } else {
+                // CSI c or CSI 0 c - Primary Device Attributes
+                handler.primary_device_attributes();
+            }
+        }
+
+        // Device Status Report (DSR)
+        'n' => {
+            let mode = params.first().copied().unwrap_or(0);
+            handler.device_status_report(mode);
+        }
+
+        // Soft Reset (DECSTR)
+        'p' if intermediates.first() == Some(&b'!') => {
+            handler.soft_reset();
+        }
+
+        // Request Terminal Parameters (DECREQTPARM)
+        'x' => {
+            let mode = params.first().copied().unwrap_or(0);
+            handler.request_terminal_parameters(mode);
+        }
+
         _ => {} // Unknown sequence, ignore
     }
 }

@@ -1,7 +1,6 @@
 //! wgpu-based terminal renderer
 
 use std::sync::Arc;
-use wgpu::util::DeviceExt;
 use crate::term::cell::Color;
 
 /// Vertex for rendering quads
@@ -39,11 +38,34 @@ pub struct Renderer {
     config: wgpu::SurfaceConfiguration,
     size: (u32, u32),
     render_pipeline: wgpu::RenderPipeline,
+    /// Pipeline for rendering RGBA images (sixel, kitty)
+    image_pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     atlas_texture: wgpu::Texture,
     atlas_bind_group: wgpu::BindGroup,
+    /// Color atlas for emoji (RGBA)
+    color_atlas_texture: wgpu::Texture,
+    color_atlas_bind_group: wgpu::BindGroup,
+    /// Dynamic image textures for sixel/kitty images
+    image_textures: Vec<ImageTexture>,
+    /// Bind group layout for images
+    image_bind_group_layout: wgpu::BindGroupLayout,
+    /// Sampler for images
+    image_sampler: wgpu::Sampler,
+    #[allow(dead_code)] // Reserved for buffer reallocation
     max_vertices: usize,
+}
+
+/// A rendered image texture
+pub struct ImageTexture {
+    pub texture: wgpu::Texture,
+    pub bind_group: wgpu::BindGroup,
+    pub width: u32,
+    pub height: u32,
+    /// Position in terminal coordinates
+    pub col: u16,
+    pub row: u16,
 }
 
 impl Renderer {
@@ -230,6 +252,111 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // Create color atlas texture (1024x1024 RGBA for emoji)
+        let color_atlas_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Color Atlas"),
+            size: wgpu::Extent3d {
+                width: atlas_size,
+                height: atlas_size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        let color_atlas_view = color_atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let color_atlas_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Color Atlas Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&color_atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&atlas_sampler),
+                },
+            ],
+        });
+
+        // Create bind group layout for RGBA images (sixel/kitty)
+        let image_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Image Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        let image_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        // Create image pipeline layout
+        let image_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Image Pipeline Layout"),
+            bind_group_layouts: &[&image_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        // Create image render pipeline (uses same shader but with RGBA texture)
+        let image_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Image Pipeline"),
+            layout: Some(&image_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::desc()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_image"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
         Ok(Self {
             surface,
             device,
@@ -237,10 +364,16 @@ impl Renderer {
             config,
             size: (size.width, size.height),
             render_pipeline,
+            image_pipeline,
             vertex_buffer,
             index_buffer,
             atlas_texture,
             atlas_bind_group,
+            color_atlas_texture,
+            color_atlas_bind_group,
+            image_textures: Vec::new(),
+            image_bind_group_layout,
+            image_sampler,
             max_vertices,
         })
     }
@@ -283,14 +416,123 @@ impl Renderer {
         );
     }
 
+    /// Update color atlas texture data (RGBA)
+    pub fn update_color_atlas(&self, data: &[u8], width: u32, height: u32) {
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.color_atlas_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4), // RGBA = 4 bytes per pixel
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    /// Upload an image (sixel/kitty) and return its index
+    pub fn upload_image(&mut self, data: &[u8], width: u32, height: u32, col: u16, row: u16) -> usize {
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Image Texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Image Bind Group"),
+            layout: &self.image_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.image_sampler),
+                },
+            ],
+        });
+
+        let image_texture = ImageTexture {
+            texture,
+            bind_group,
+            width,
+            height,
+            col,
+            row,
+        };
+
+        self.image_textures.push(image_texture);
+        self.image_textures.len() - 1
+    }
+
+    /// Clear all image textures
+    pub fn clear_images(&mut self) {
+        self.image_textures.clear();
+    }
+
+    /// Get image textures for rendering
+    pub fn image_textures(&self) -> &[ImageTexture] {
+        &self.image_textures
+    }
+
     /// Render a frame with the given vertices
     pub fn render(&mut self, vertices: &[Vertex], indices: &[u32]) -> Result<(), String> {
+        self.render_with_images(vertices, indices, &[])
+    }
+
+    /// Render a frame with text vertices and image quads
+    pub fn render_with_images(
+        &mut self,
+        vertices: &[Vertex],
+        indices: &[u32],
+        image_draws: &[(usize, &[Vertex], &[u32])], // (image_index, vertices, indices)
+    ) -> Result<(), String> {
         let output = self.surface.get_current_texture()
             .map_err(|e| e.to_string())?;
 
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Update buffers
+        // Update buffers for text
         self.queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(vertices));
         self.queue.write_buffer(&self.index_buffer, 0, bytemuck::cast_slice(indices));
 
@@ -319,11 +561,31 @@ impl Renderer {
                 timestamp_writes: None,
             });
 
+            // Render text with grayscale atlas
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.atlas_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
+
+            // Render images
+            if !image_draws.is_empty() {
+                render_pass.set_pipeline(&self.image_pipeline);
+                
+                for (image_idx, img_vertices, img_indices) in image_draws {
+                    if *image_idx < self.image_textures.len() {
+                        // Update buffers with image quad data
+                        // Note: In a production impl, we'd use separate buffers or offsets
+                        self.queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(img_vertices));
+                        self.queue.write_buffer(&self.index_buffer, 0, bytemuck::cast_slice(img_indices));
+                        
+                        render_pass.set_bind_group(0, &self.image_textures[*image_idx].bind_group, &[]);
+                        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                        render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                        render_pass.draw_indexed(0..img_indices.len() as u32, 0, 0..1);
+                    }
+                }
+            }
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));

@@ -16,6 +16,7 @@ use std::collections::HashMap;
 /// Maximum image dimensions to prevent memory exhaustion
 const MAX_IMAGE_WIDTH: u32 = 4096;
 const MAX_IMAGE_HEIGHT: u32 = 4096;
+#[allow(dead_code)] // Reserved for payload validation
 const MAX_PAYLOAD_SIZE: usize = 4 * 1024 * 1024; // 4MB
 
 /// Image format in Kitty protocol
@@ -376,8 +377,9 @@ impl KittyDecoder {
 
     /// Decode PNG data
     fn decode_png(&self, data: &[u8], id: Option<u32>) -> Result<Option<KittyImage>, KittyError> {
-        // Basic PNG decoding - in production would use image crate
-        // For now, return placeholder indicating PNG support
+        use image::ImageReader;
+        use std::io::Cursor;
+        
         if data.len() < 8 {
             return Err(KittyError::InvalidPngData);
         }
@@ -388,12 +390,25 @@ impl KittyDecoder {
             return Err(KittyError::InvalidPngData);
         }
 
-        // TODO: Actual PNG decoding with image crate
-        // For now, create a placeholder
+        // Decode PNG using image crate
+        let cursor = Cursor::new(data);
+        let reader = ImageReader::with_format(cursor, image::ImageFormat::Png);
+        let img = reader.decode()
+            .map_err(|_| KittyError::InvalidPngData)?;
+        
+        let rgba = img.to_rgba8();
+        let width = rgba.width();
+        let height = rgba.height();
+        
+        // Check dimensions
+        if width > MAX_IMAGE_WIDTH || height > MAX_IMAGE_HEIGHT {
+            return Err(KittyError::ImageTooLarge);
+        }
+
         Ok(Some(KittyImage {
-            data: vec![0; 4], // 1x1 transparent pixel
-            width: 1,
-            height: 1,
+            data: rgba.into_raw(),
+            width,
+            height,
             id,
         }))
     }
@@ -539,11 +554,16 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, KittyError> {
     Ok(output)
 }
 
-/// Decompress zlib data (placeholder - would use flate2 in production)
-fn decompress_zlib(_data: &[u8]) -> Result<Vec<u8>, KittyError> {
-    // In production, use flate2::read::ZlibDecoder
-    // For now, return error if compression is used
-    Err(KittyError::DecompressionError)
+/// Decompress zlib data
+fn decompress_zlib(data: &[u8]) -> Result<Vec<u8>, KittyError> {
+    use flate2::read::ZlibDecoder;
+    use std::io::Read;
+    
+    let mut decoder = ZlibDecoder::new(data);
+    let mut decompressed = Vec::new();
+    decoder.read_to_end(&mut decompressed)
+        .map_err(|_| KittyError::DecompressionError)?;
+    Ok(decompressed)
 }
 
 #[cfg(test)]

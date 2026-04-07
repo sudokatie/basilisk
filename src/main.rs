@@ -69,8 +69,8 @@ fn main() -> Result<()> {
             attach_session(session)?;
         }
         None => {
-            // Launch terminal
-            App::run(config)?;
+            // Launch terminal with optional hold mode
+            App::run_with_options(config, cli.hold)?;
         }
     }
 
@@ -160,19 +160,44 @@ fn attach_session(session: Option<String>) -> Result<()> {
             println!("Attached to session ({}x{})", cols, rows);
             
             // Enter raw mode and forward I/O
-            // This is a simplified implementation - full version would need
-            // proper terminal raw mode and signal handling
             use std::io::{Read, Write};
-            
-            client.set_nonblocking(true)?;
+            use std::os::unix::io::AsRawFd;
             
             let stdin = std::io::stdin();
             let mut stdout = std::io::stdout();
+            let stdin_fd = stdin.as_raw_fd();
+            
+            // Save original terminal settings and set raw mode
+            let original_termios = setup_raw_mode(stdin_fd)?;
+            
+            // Make stdin non-blocking
+            let flags = unsafe { libc::fcntl(stdin_fd, libc::F_GETFL) };
+            unsafe { libc::fcntl(stdin_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+            
+            client.set_nonblocking(true)?;
+            
+            let mut stdin_handle = stdin.lock();
             let mut input_buf = [0u8; 1024];
             
             loop {
-                // Check for input from stdin
-                // Note: This is simplified - real impl needs termios raw mode
+                // Read from stdin (non-blocking)
+                match stdin_handle.read(&mut input_buf) {
+                    Ok(0) => {
+                        // EOF - user closed stdin
+                        break;
+                    }
+                    Ok(n) => {
+                        // Send input to session
+                        client.send(&basilisk::mux::IpcMessage::Input(input_buf[..n].to_vec()))?;
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        // No input available
+                    }
+                    Err(e) => {
+                        eprintln!("stdin error: {}", e);
+                        break;
+                    }
+                }
                 
                 // Check for output from session
                 match client.recv() {
@@ -181,7 +206,7 @@ fn attach_session(session: Option<String>) -> Result<()> {
                         stdout.flush()?;
                     }
                     Ok(Some(basilisk::mux::IpcMessage::SessionEnd)) => {
-                        println!("\nSession ended.");
+                        println!("\r\nSession ended.");
                         break;
                     }
                     Ok(_) => {}
@@ -190,6 +215,12 @@ fn attach_session(session: Option<String>) -> Result<()> {
                     }
                 }
             }
+            
+            // Restore terminal settings
+            restore_terminal(stdin_fd, &original_termios);
+            
+            // Restore blocking mode
+            unsafe { libc::fcntl(stdin_fd, libc::F_SETFL, flags) };
         }
         Some(basilisk::mux::IpcMessage::SessionEnd) => {
             println!("Session has ended.");
@@ -200,6 +231,39 @@ fn attach_session(session: Option<String>) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Set up raw terminal mode for attach
+#[cfg(unix)]
+fn setup_raw_mode(fd: i32) -> Result<libc::termios> {
+    use std::mem::MaybeUninit;
+    
+    let mut termios = MaybeUninit::<libc::termios>::uninit();
+    if unsafe { libc::tcgetattr(fd, termios.as_mut_ptr()) } != 0 {
+        return Err(basilisk::Error::Io(std::io::Error::last_os_error()));
+    }
+    let original = unsafe { termios.assume_init() };
+    
+    let mut raw = original;
+    // Disable echo and canonical mode
+    raw.c_lflag &= !(libc::ECHO | libc::ICANON | libc::ISIG | libc::IEXTEN);
+    raw.c_iflag &= !(libc::IXON | libc::ICRNL | libc::BRKINT | libc::INPCK | libc::ISTRIP);
+    raw.c_oflag &= !libc::OPOST;
+    raw.c_cflag |= libc::CS8;
+    raw.c_cc[libc::VMIN] = 0;
+    raw.c_cc[libc::VTIME] = 0;
+    
+    if unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &raw) } != 0 {
+        return Err(basilisk::Error::Io(std::io::Error::last_os_error()));
+    }
+    
+    Ok(original)
+}
+
+/// Restore terminal settings
+#[cfg(unix)]
+fn restore_terminal(fd: i32, termios: &libc::termios) {
+    unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, termios) };
 }
 
 /// Get the session directory path

@@ -34,6 +34,8 @@ pub struct Cell {
     pub fg: Color,
     pub bg: Color,
     pub flags: CellFlags,
+    /// Hyperlink ID (0 = no link, >0 = link reference)
+    pub hyperlink_id: u32,
 }
 
 impl Color {
@@ -107,6 +109,7 @@ impl Cell {
             fg: Color::rgb(255, 255, 255),
             bg: Color::rgb(0, 0, 0),
             flags: CellFlags::empty(),
+            hyperlink_id: 0,
         }
     }
 
@@ -116,11 +119,12 @@ impl Cell {
             fg: Color::rgb(255, 255, 255),
             bg: Color::rgb(0, 0, 0),
             flags: CellFlags::empty(),
+            hyperlink_id: 0,
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.c == ' ' && self.flags.is_empty()
+        self.c == ' ' && self.flags.is_empty() && self.hyperlink_id == 0
     }
 
     pub fn reset(&mut self) {
@@ -128,6 +132,12 @@ impl Cell {
         self.fg = Color::rgb(255, 255, 255);
         self.bg = Color::rgb(0, 0, 0);
         self.flags = CellFlags::empty();
+        self.hyperlink_id = 0;
+    }
+
+    /// Check if cell has a hyperlink
+    pub fn has_hyperlink(&self) -> bool {
+        self.hyperlink_id != 0
     }
 }
 

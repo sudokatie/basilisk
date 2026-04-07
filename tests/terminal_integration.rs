@@ -234,3 +234,117 @@ fn grid_scroll() {
     // New first line should be empty
     assert_eq!(grid.cell(0, 0).c, ' ');
 }
+
+#[test]
+fn terminal_alternate_screen() {
+    let mut term = Terminal::new(80, 24, 1000);
+    
+    // Write something on primary screen
+    term.process(b"Primary");
+    assert_eq!(term.grid().cell(0, 0).c, 'P');
+    assert!(!term.is_alternate_screen());
+    
+    // Switch to alternate screen (mode 1049)
+    term.process(b"\x1b[?1049h");
+    assert!(term.is_alternate_screen());
+    
+    // Alternate screen should be clear
+    assert_eq!(term.grid().cell(0, 0).c, ' ');
+    
+    // Write on alternate screen
+    term.process(b"Alternate");
+    assert_eq!(term.grid().cell(0, 0).c, 'A');
+    
+    // Switch back to primary screen
+    term.process(b"\x1b[?1049l");
+    assert!(!term.is_alternate_screen());
+    
+    // Primary content should be preserved
+    assert_eq!(term.grid().cell(0, 0).c, 'P');
+}
+
+#[test]
+fn terminal_set_tab_stop() {
+    let mut term = Terminal::new(80, 24, 1000);
+    
+    // Clear all tabs first
+    term.process(b"\x1b[3g");
+    
+    // Move to column 5 and set tab stop (ESC H)
+    term.process(b"\x1b[6G\x1bH");
+    
+    // Go to beginning and tab - should go to column 5
+    term.process(b"\r\tX");
+    
+    let grid = term.grid();
+    assert_eq!(grid.cell(5, 0).c, 'X');
+}
+
+#[test]
+fn terminal_dec_save_restore_cursor() {
+    let mut term = Terminal::new(80, 24, 1000);
+    
+    // Move to position and save with ESC 7
+    term.process(b"\x1b[3;7H\x1b7");
+    
+    // Move away
+    term.process(b"\x1b[1;1H");
+    
+    // Restore with ESC 8 and write
+    term.process(b"\x1b8X");
+    
+    let grid = term.grid();
+    // Should be at saved position (line 3, col 7 -> 0-indexed: 2, 6)
+    assert_eq!(grid.cell(6, 2).c, 'X');
+}
+
+#[test]
+fn terminal_bracketed_paste_mode() {
+    let mut term = Terminal::new(80, 24, 1000);
+    
+    // Enable bracketed paste mode
+    term.process(b"\x1b[?2004h");
+    assert!(term.modes().bracketed_paste);
+    
+    // Disable
+    term.process(b"\x1b[?2004l");
+    assert!(!term.modes().bracketed_paste);
+}
+
+#[test]
+fn terminal_mouse_tracking_modes() {
+    use basilisk::term::MouseMode;
+    
+    let mut term = Terminal::new(80, 24, 1000);
+    
+    // Default is no tracking
+    assert_eq!(term.modes().mouse_tracking, MouseMode::None);
+    
+    // Enable X10 mouse tracking
+    term.process(b"\x1b[?1000h");
+    assert_eq!(term.modes().mouse_tracking, MouseMode::X10);
+    
+    // Enable SGR mode
+    term.process(b"\x1b[?1006h");
+    assert_eq!(term.modes().mouse_tracking, MouseMode::Sgr);
+    
+    // Disable
+    term.process(b"\x1b[?1000l");
+    assert_eq!(term.modes().mouse_tracking, MouseMode::None);
+}
+
+#[test]
+fn terminal_focus_reporting() {
+    let mut term = Terminal::new(80, 24, 1000);
+    
+    // Default off
+    assert!(!term.modes().focus_reporting);
+    
+    // Enable focus reporting
+    term.process(b"\x1b[?1004h");
+    assert!(term.modes().focus_reporting);
+    
+    // Disable
+    term.process(b"\x1b[?1004l");
+    assert!(!term.modes().focus_reporting);
+}

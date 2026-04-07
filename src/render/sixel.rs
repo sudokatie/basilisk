@@ -135,11 +135,15 @@ pub struct SixelDecoder {
     aspect_num: u16,
     /// Aspect ratio denominator
     aspect_den: u16,
-    /// Horizontal grid size
+    /// Horizontal grid size (parsed but not yet used)
+    #[allow(dead_code)]
     grid_width: u16,
-    /// Vertical grid size
+    /// Vertical grid size (parsed but not yet used)
+    #[allow(dead_code)]
     grid_height: u16,
     /// Background mode (0 = device default, 1 = no change, 2 = transparent)
+    /// Parsed but not yet used in rendering
+    #[allow(dead_code)]
     bg_mode: u8,
     /// The decoded image
     image: SixelImage,

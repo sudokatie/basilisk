@@ -1,6 +1,6 @@
 //! Glyph rasterization using fontdue
 
-use fontdue::{Font as FontdueFont, FontSettings, Metrics};
+use fontdue::{Font as FontdueFont, FontSettings};
 
 /// A loaded font for text rendering
 pub struct Font {
@@ -194,6 +194,101 @@ pub fn load_font_file(path: &str) -> Option<Vec<u8>> {
     }
 
     None
+}
+
+/// A chain of fonts for fallback support
+/// Tries each font in order until one has the glyph
+pub struct FontChain {
+    fonts: Vec<Font>,
+}
+
+impl FontChain {
+    /// Create a new font chain with an initial font
+    pub fn new(primary: Font) -> Self {
+        Self {
+            fonts: vec![primary],
+        }
+    }
+
+    /// Add a fallback font to the chain
+    pub fn add_fallback(&mut self, font: Font) {
+        self.fonts.push(font);
+    }
+
+    /// Get the primary font
+    pub fn primary(&self) -> &Font {
+        &self.fonts[0]
+    }
+
+    /// Rasterize a character, trying fonts in order
+    pub fn rasterize(&self, c: char) -> RasterizedGlyph {
+        // Try each font until one has the glyph
+        for font in &self.fonts {
+            if font.has_glyph(c) {
+                return font.rasterize(c);
+            }
+        }
+        
+        // Fall back to primary font (will render placeholder/tofu)
+        self.fonts[0].rasterize(c)
+    }
+
+    /// Check if any font in the chain has the glyph
+    pub fn has_glyph(&self, c: char) -> bool {
+        self.fonts.iter().any(|f| f.has_glyph(c))
+    }
+
+    /// Get the font that has the glyph (or primary as fallback)
+    pub fn font_for(&self, c: char) -> &Font {
+        for font in &self.fonts {
+            if font.has_glyph(c) {
+                return font;
+            }
+        }
+        &self.fonts[0]
+    }
+}
+
+/// Load system fallback fonts for emoji and symbols
+pub fn load_fallback_fonts(size: f32) -> Vec<Font> {
+    let mut fonts = Vec::new();
+    
+    // Emoji fonts
+    let emoji_paths = [
+        // macOS
+        "/System/Library/Fonts/Apple Color Emoji.ttc",
+        // Linux
+        "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+        "/usr/share/fonts/google-noto-emoji/NotoColorEmoji.ttf",
+    ];
+
+    for path in emoji_paths {
+        if let Ok(data) = std::fs::read(path) {
+            if let Some(font) = Font::from_bytes(&data, size) {
+                fonts.push(font);
+                break; // Only need one emoji font
+            }
+        }
+    }
+
+    // Symbol fallback fonts
+    let symbol_paths = [
+        // macOS
+        "/System/Library/Fonts/Supplemental/Symbol.ttf",
+        // Linux - DejaVu has good symbol coverage
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ];
+
+    for path in symbol_paths {
+        if let Ok(data) = std::fs::read(path) {
+            if let Some(font) = Font::from_bytes(&data, size) {
+                fonts.push(font);
+                break;
+            }
+        }
+    }
+
+    fonts
 }
 
 #[cfg(test)]

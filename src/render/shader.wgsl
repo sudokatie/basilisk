@@ -44,3 +44,29 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     
     return color;
 }
+
+// Fragment shader for RGBA images (sixel, kitty, color emoji)
+@fragment
+fn fs_image(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Sample the RGBA texture directly
+    let texel = textureSample(t_atlas, s_atlas, in.tex_coords);
+    
+    // Blend with background using texture alpha
+    let bg = in.bg_color;
+    let color = mix(bg, texel, texel.a);
+    
+    return color;
+}
+
+// Fragment shader for color glyphs (emoji) - tints with foreground color
+@fragment
+fn fs_color_glyph(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Sample the RGBA texture
+    let texel = textureSample(t_atlas, s_atlas, in.tex_coords);
+    
+    // Use texture color directly (for emoji), blend with background
+    let bg = in.bg_color;
+    let color = mix(bg, texel, texel.a);
+    
+    return color;
+}

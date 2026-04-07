@@ -1,6 +1,6 @@
 //! Pane - a terminal instance within a window
 
-use crate::term::Terminal;
+use crate::term::{Terminal, ColorPalette};
 use crate::pty::Pty;
 use crate::input::KeyboardHandler;
 use crate::Result;
@@ -71,6 +71,11 @@ impl Pane {
     /// Get mutable terminal reference
     pub fn terminal_mut(&mut self) -> &mut Terminal {
         &mut self.terminal
+    }
+
+    /// Set the color palette for this pane's terminal
+    pub fn set_color_palette(&mut self, palette: ColorPalette) {
+        self.terminal.set_color_palette(palette);
     }
 
     /// Get keyboard handler reference

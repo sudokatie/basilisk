@@ -181,6 +181,10 @@ impl App {
         );
         session.set_shell(&self.config.terminal.shell);
 
+        // Apply color palette from config
+        let palette = self.config.colors.to_palette();
+        session.apply_color_palette(&palette);
+
         // Set up clipboard callback for OSC 52
         let clipboard = Arc::clone(&self.clipboard);
         if let Some(window) = session.active_window_mut() {
@@ -1449,7 +1453,12 @@ impl ApplicationHandler for App {
                 if let Some(new_config) = Config::reload(path, &self.config) {
                     log::info!("Config reloaded");
                     // Apply color changes
-                    self.config.colors = new_config.colors;
+                    self.config.colors = new_config.colors.clone();
+                    // Apply color palette to terminal
+                    let palette = new_config.colors.to_palette();
+                    if let Some(session) = &mut self.session {
+                        session.apply_color_palette(&palette);
+                    }
                     // Apply window opacity if changed
                     if (new_config.window.opacity - self.config.window.opacity).abs() > 0.01 {
                         self.config.window.opacity = new_config.window.opacity;

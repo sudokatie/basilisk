@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use serde::{Serialize, Deserialize};
 use super::window::{Window, WindowId, SplitDirection};
 use super::pane::{Pane, PaneId};
+use crate::term::ColorPalette;
 use crate::Result;
 
 /// Unique identifier for a session
@@ -56,6 +57,8 @@ pub struct Session {
     default_cols: u16,
     default_rows: u16,
     scrollback: usize,
+    /// Color palette for new panes
+    color_palette: Option<ColorPalette>,
 }
 
 impl Session {
@@ -72,6 +75,7 @@ impl Session {
             default_cols: 80,
             default_rows: 24,
             scrollback: 10000,
+            color_palette: None,
         }
     }
 
@@ -167,7 +171,13 @@ impl Session {
         let pane_id = PaneId::new(self.next_pane_id);
         self.next_pane_id += 1;
 
-        let pane = Pane::new(pane_id, self.default_cols, self.default_rows, self.scrollback);
+        let mut pane = Pane::new(pane_id, self.default_cols, self.default_rows, self.scrollback);
+        
+        // Apply color palette to new pane
+        if let Some(ref palette) = self.color_palette {
+            pane.set_color_palette(palette.clone());
+        }
+        
         let window = Window::new(window_id, name, pane, self.default_cols, self.default_rows);
 
         self.windows.push(window);
@@ -227,7 +237,12 @@ impl Session {
         let pane_id = PaneId::new(self.next_pane_id);
         self.next_pane_id += 1;
 
-        let pane = Pane::new(pane_id, self.default_cols, self.default_rows, self.scrollback);
+        let mut pane = Pane::new(pane_id, self.default_cols, self.default_rows, self.scrollback);
+        
+        // Apply color palette to new pane
+        if let Some(ref palette) = self.color_palette {
+            pane.set_color_palette(palette.clone());
+        }
 
         if let Some(window) = self.active_window_mut() {
             window.add_pane(pane, direction);
@@ -415,6 +430,27 @@ impl Session {
             }
         }
         None
+    }
+
+    /// Apply color palette to all panes in this session
+    /// Apply color palette to all panes and store for new panes
+    pub fn apply_color_palette(&mut self, palette: &ColorPalette) {
+        // Store for new panes
+        self.color_palette = Some(palette.clone());
+        
+        // Apply to existing panes
+        for window in &mut self.windows {
+            for pane in window.panes_mut() {
+                pane.set_color_palette(palette.clone());
+            }
+        }
+    }
+
+    /// Apply stored color palette to a newly created pane
+    fn apply_palette_to_pane(&self, pane: &mut Pane) {
+        if let Some(ref palette) = self.color_palette {
+            pane.set_color_palette(palette.clone());
+        }
     }
 }
 

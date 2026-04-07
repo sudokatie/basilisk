@@ -6,6 +6,7 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 use crate::Result;
+use crate::term::cell::{Color, ColorPalette};
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
@@ -198,6 +199,34 @@ impl Default for ColorScheme {
     }
 }
 
+impl ColorScheme {
+    /// Convert color scheme to a terminal color palette
+    pub fn to_palette(&self) -> ColorPalette {
+        let parse = |hex: &str| -> Color {
+            Color::from_hex(hex).unwrap_or(Color::rgb(255, 255, 255))
+        };
+
+        ColorPalette::from_config(
+            parse(&self.black),
+            parse(&self.red),
+            parse(&self.green),
+            parse(&self.yellow),
+            parse(&self.blue),
+            parse(&self.magenta),
+            parse(&self.cyan),
+            parse(&self.white),
+            parse(&self.bright_black),
+            parse(&self.bright_red),
+            parse(&self.bright_green),
+            parse(&self.bright_yellow),
+            parse(&self.bright_blue),
+            parse(&self.bright_magenta),
+            parse(&self.bright_cyan),
+            parse(&self.bright_white),
+        )
+    }
+}
+
 impl Default for ScrollbackConfig {
     fn default() -> Self {
         Self { lines: 10000 }
@@ -361,5 +390,45 @@ lines = 5000
         assert_eq!(config.font.family, "JetBrains Mono");
         assert_eq!(config.font.size, 16.0);
         assert_eq!(config.scrollback.lines, 5000);
+    }
+
+    #[test]
+    fn color_scheme_to_palette() {
+        let scheme = ColorScheme::default();
+        let palette = scheme.to_palette();
+        
+        // Check that colors are properly converted from hex
+        // Default black is "#282a2e"
+        let black = palette.get(0);
+        assert_eq!(black.r, 0x28);
+        assert_eq!(black.g, 0x2a);
+        assert_eq!(black.b, 0x2e);
+        
+        // Default red is "#a54242"
+        let red = palette.get(1);
+        assert_eq!(red.r, 0xa5);
+        assert_eq!(red.g, 0x42);
+        assert_eq!(red.b, 0x42);
+    }
+
+    #[test]
+    fn custom_color_scheme_to_palette() {
+        let mut scheme = ColorScheme::default();
+        scheme.red = "#ff0000".into();
+        scheme.bright_red = "#ff8080".into();
+        
+        let palette = scheme.to_palette();
+        
+        // Check custom red
+        let red = palette.get(1);
+        assert_eq!(red.r, 255);
+        assert_eq!(red.g, 0);
+        assert_eq!(red.b, 0);
+        
+        // Check custom bright red
+        let bright_red = palette.get(9);
+        assert_eq!(bright_red.r, 255);
+        assert_eq!(bright_red.g, 0x80);
+        assert_eq!(bright_red.b, 0x80);
     }
 }

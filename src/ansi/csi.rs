@@ -145,40 +145,42 @@ fn handle_sgr<H: Handler>(handler: &mut H, params: &[u16]) {
             28 => handler.set_attr(Attr::CancelHidden),
             29 => handler.set_attr(Attr::CancelStrike),
 
-            // Foreground colors (8 standard)
+            // Foreground colors (8 standard) - use indexed color
             30..=37 => {
-                let color = Color::from_ansi((params[i] - 30) as u8);
-                handler.set_attr(Attr::Foreground(color));
+                handler.set_attr(Attr::ForegroundIndex((params[i] - 30) as u8));
             }
             38 => {
-                if let Some(color) = parse_color(params, &mut i) {
-                    handler.set_attr(Attr::Foreground(color));
+                if let Some(result) = parse_color_or_index(params, &mut i) {
+                    match result {
+                        ColorOrIndex::Color(c) => handler.set_attr(Attr::Foreground(c)),
+                        ColorOrIndex::Index(idx) => handler.set_attr(Attr::ForegroundIndex(idx)),
+                    }
                 }
             }
             39 => handler.set_attr(Attr::DefaultForeground),
 
-            // Background colors (8 standard)
+            // Background colors (8 standard) - use indexed color
             40..=47 => {
-                let color = Color::from_ansi((params[i] - 40) as u8);
-                handler.set_attr(Attr::Background(color));
+                handler.set_attr(Attr::BackgroundIndex((params[i] - 40) as u8));
             }
             48 => {
-                if let Some(color) = parse_color(params, &mut i) {
-                    handler.set_attr(Attr::Background(color));
+                if let Some(result) = parse_color_or_index(params, &mut i) {
+                    match result {
+                        ColorOrIndex::Color(c) => handler.set_attr(Attr::Background(c)),
+                        ColorOrIndex::Index(idx) => handler.set_attr(Attr::BackgroundIndex(idx)),
+                    }
                 }
             }
             49 => handler.set_attr(Attr::DefaultBackground),
 
-            // Bright foreground colors
+            // Bright foreground colors - use indexed color (8-15)
             90..=97 => {
-                let color = Color::from_256((params[i] - 90 + 8) as u8);
-                handler.set_attr(Attr::Foreground(color));
+                handler.set_attr(Attr::ForegroundIndex((params[i] - 90 + 8) as u8));
             }
 
-            // Bright background colors
+            // Bright background colors - use indexed color (8-15)
             100..=107 => {
-                let color = Color::from_256((params[i] - 100 + 8) as u8);
-                handler.set_attr(Attr::Background(color));
+                handler.set_attr(Attr::BackgroundIndex((params[i] - 100 + 8) as u8));
             }
 
             _ => {} // Unknown, ignore
@@ -188,17 +190,32 @@ fn handle_sgr<H: Handler>(handler: &mut H, params: &[u16]) {
 }
 
 /// Parse extended color (256-color or true color)
-fn parse_color(params: &[u16], i: &mut usize) -> Option<Color> {
+/// Either a direct color or an index into the palette
+enum ColorOrIndex {
+    Color(Color),
+    Index(u8),
+}
+
+/// Parse extended color - returns either RGB color or palette index
+fn parse_color_or_index(params: &[u16], i: &mut usize) -> Option<ColorOrIndex> {
     if *i + 1 >= params.len() {
         return None;
     }
 
     match params[*i + 1] {
         // 256-color mode: 38;5;N or 48;5;N
+        // Colors 0-15 are palette colors, 16-255 are fixed
         5 => {
             if *i + 2 < params.len() {
                 *i += 2;
-                Some(Color::from_256(params[*i] as u8))
+                let index = params[*i] as u8;
+                if index < 16 {
+                    // Palette color - return index for palette lookup
+                    Some(ColorOrIndex::Index(index))
+                } else {
+                    // Fixed color (cube or grayscale)
+                    Some(ColorOrIndex::Color(Color::from_256(index)))
+                }
             } else {
                 None
             }
@@ -210,7 +227,7 @@ fn parse_color(params: &[u16], i: &mut usize) -> Option<Color> {
                 let g = params[*i + 3] as u8;
                 let b = params[*i + 4] as u8;
                 *i += 4;
-                Some(Color::rgb(r, g, b))
+                Some(ColorOrIndex::Color(Color::rgb(r, g, b)))
             } else {
                 None
             }

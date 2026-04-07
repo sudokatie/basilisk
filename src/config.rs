@@ -49,6 +49,7 @@ pub struct FontConfig {
     pub size: f32,
     pub bold_font: Option<String>,
     pub italic_font: Option<String>,
+    pub bold_italic_font: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -166,6 +167,7 @@ impl Default for FontConfig {
             size: 14.0,
             bold_font: None,
             italic_font: None,
+            bold_italic_font: None,
         }
     }
 }
@@ -276,6 +278,7 @@ impl PartialEq for FontConfig {
             && (self.size - other.size).abs() < 0.01
             && self.bold_font == other.bold_font
             && self.italic_font == other.italic_font
+            && self.bold_italic_font == other.bold_italic_font
     }
 }
 

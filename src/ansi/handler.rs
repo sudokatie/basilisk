@@ -22,8 +22,14 @@ pub enum Attr {
     CancelInverse,
     CancelHidden,
     CancelStrike,
+    /// True color foreground (RGB)
     Foreground(Color),
+    /// True color background (RGB)
     Background(Color),
+    /// ANSI indexed foreground (0-255, uses palette for 0-15)
+    ForegroundIndex(u8),
+    /// ANSI indexed background (0-255, uses palette for 0-15)
+    BackgroundIndex(u8),
     DefaultForeground,
     DefaultBackground,
 }

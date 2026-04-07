@@ -3,7 +3,7 @@
 use unicode_segmentation::UnicodeSegmentation;
 use crate::ansi::{Attr, Handler, Parser, Action, csi_dispatch, osc_dispatch};
 use crate::render::sixel::SixelDecoder;
-use super::cell::{CellFlags, Color};
+use super::cell::{CellFlags, Color, ColorPalette, SharedGraphemeStorage, new_grapheme_storage};
 use super::cursor::{Cursor, CursorShape, SavedCursor};
 use super::grid::Grid;
 
@@ -31,7 +31,8 @@ fn utf8_sequence_length(byte: u8) -> usize {
 #[derive(Clone, Copy)]
 enum ProcessItem {
     Byte(u8),
-    Char(char),
+    /// Character with optional grapheme key (0 = single char, >0 = multi-codepoint)
+    Char(char, u32),
 }
 
 /// Sixel image placed in terminal
@@ -276,6 +277,10 @@ pub struct Terminal {
     active_charset: CharsetSlot,
     /// PTY write callback for terminal responses
     pty_writer: Option<Box<dyn Fn(&[u8]) + Send + Sync>>,
+    /// Color palette for ANSI colors (configurable)
+    color_palette: ColorPalette,
+    /// Grapheme cluster storage for multi-codepoint characters
+    grapheme_storage: SharedGraphemeStorage,
 }
 
 impl Terminal {
@@ -323,6 +328,8 @@ impl Terminal {
             charset_g3: Charset::Ascii,
             active_charset: CharsetSlot::G0,
             pty_writer: None,
+            color_palette: ColorPalette::default(),
+            grapheme_storage: new_grapheme_storage(),
         }
     }
 
@@ -339,6 +346,31 @@ impl Terminal {
         if let Some(writer) = &self.pty_writer {
             writer(data);
         }
+    }
+
+    /// Set the color palette
+    pub fn set_color_palette(&mut self, palette: ColorPalette) {
+        self.color_palette = palette;
+    }
+
+    /// Get the color palette
+    pub fn color_palette(&self) -> &ColorPalette {
+        &self.color_palette
+    }
+
+    /// Get the grapheme storage
+    pub fn grapheme_storage(&self) -> &SharedGraphemeStorage {
+        &self.grapheme_storage
+    }
+
+    /// Get grapheme string by key
+    pub fn get_grapheme(&self, key: u32) -> Option<String> {
+        if key == 0 {
+            return None;
+        }
+        self.grapheme_storage.read().ok().and_then(|storage| {
+            storage.get(key).map(|s| s.to_string())
+        })
     }
 
     /// Get search state
@@ -583,7 +615,18 @@ impl Terminal {
             if let Ok(s) = std::str::from_utf8(&self.utf8_buffer[i..i + seq_len]) {
                 for grapheme in s.graphemes(true) {
                     if let Some(c) = grapheme.chars().next() {
-                        chars_to_process.push(ProcessItem::Char(c));
+                        // Check if this is a multi-codepoint grapheme
+                        let grapheme_key = if grapheme.chars().count() > 1 {
+                            // Store the full grapheme and get a key
+                            if let Ok(mut storage) = self.grapheme_storage.write() {
+                                storage.store(grapheme)
+                            } else {
+                                0
+                            }
+                        } else {
+                            0
+                        };
+                        chars_to_process.push(ProcessItem::Char(c, grapheme_key));
                     }
                 }
             }
@@ -604,11 +647,11 @@ impl Terminal {
                         self.execute(action);
                     }
                 }
-                ProcessItem::Char(c) => {
+                ProcessItem::Char(c, grapheme_key) => {
                     if let Some(action) = self.parser.advance_char(c) {
                         self.execute(action);
                     } else if self.parser.is_ground() {
-                        self.input(c);
+                        self.input_grapheme(c, grapheme_key);
                     }
                 }
             }
@@ -716,6 +759,13 @@ impl Terminal {
             return;
         }
 
+        // Check for DECRQSS (Request Selection or Setting Status)
+        // Format: DCS $ q Pt ST
+        if intermediates == b"$" && data.first() == Some(&b'q') {
+            self.handle_decrqss(&data[1..]);
+            return;
+        }
+
         // Check for Kitty graphics protocol (APC G ... ST)
         // Kitty graphics can arrive via DCS or APC
         if let Some(&first) = data.first() {
@@ -757,6 +807,49 @@ impl Terminal {
                 self.linefeed();
             }
         }
+    }
+
+    /// Handle DECRQSS (Request Selection or Setting Status)
+    /// Format: DCS $ q Pt ST -> DCS Ps $ r Pt ST
+    fn handle_decrqss(&mut self, request: &[u8]) {
+        let request_str = std::str::from_utf8(request).unwrap_or("");
+        
+        // Build response based on request
+        let response = match request_str {
+            // DECSCUSR - Cursor style
+            " q" => {
+                let style = match self.cursor.shape {
+                    CursorShape::Block => if self.cursor.blink.enabled { 1 } else { 2 },
+                    CursorShape::Underline => if self.cursor.blink.enabled { 3 } else { 4 },
+                    CursorShape::Beam => if self.cursor.blink.enabled { 5 } else { 6 },
+                };
+                format!("\x1bP1$r{} q\x1b\\", style)
+            }
+            // DECSTBM - Scroll region
+            "r" => {
+                format!("\x1bP1$r{};{}r\x1b\\", self.scroll_top + 1, self.scroll_bottom + 1)
+            }
+            // SGR - Graphics rendition
+            "m" => {
+                let mut sgr = Vec::new();
+                if self.cursor.flags.contains(CellFlags::BOLD) { sgr.push("1"); }
+                if self.cursor.flags.contains(CellFlags::DIM) { sgr.push("2"); }
+                if self.cursor.flags.contains(CellFlags::ITALIC) { sgr.push("3"); }
+                if self.cursor.flags.contains(CellFlags::UNDERLINE) { sgr.push("4"); }
+                if self.cursor.flags.contains(CellFlags::BLINK) { sgr.push("5"); }
+                if self.cursor.flags.contains(CellFlags::INVERSE) { sgr.push("7"); }
+                if self.cursor.flags.contains(CellFlags::HIDDEN) { sgr.push("8"); }
+                if self.cursor.flags.contains(CellFlags::STRIKETHROUGH) { sgr.push("9"); }
+                let sgr_str = if sgr.is_empty() { "0".to_string() } else { sgr.join(";") };
+                format!("\x1bP1$r{}m\x1b\\", sgr_str)
+            }
+            // DECSCL - Conformance level (report VT400)
+            "\"p" => "\x1bP1$r64;1\"p\x1b\\".to_string(),
+            // Unknown request - send invalid response
+            _ => format!("\x1bP0$r\x1b\\"),
+        };
+        
+        self.write_pty(response.as_bytes());
     }
 
     /// Handle Kitty graphics protocol
@@ -832,6 +925,11 @@ impl Terminal {
 
     /// Write a character at cursor position, advancing cursor
     fn write_char(&mut self, c: char) {
+        self.write_char_with_grapheme(c, 0);
+    }
+
+    /// Write a character with an associated grapheme cluster key
+    fn write_char_with_grapheme(&mut self, c: char, grapheme_key: u32) {
         let cols = self.grid.cols();
 
         // Translate character based on active charset
@@ -854,6 +952,7 @@ impl Terminal {
         // Write the character
         let cell = self.grid.cell_mut(self.cursor.col, self.cursor.line);
         cell.c = c;
+        cell.grapheme_key = grapheme_key;
         cell.fg = self.cursor.fg;
         cell.bg = self.cursor.bg;
         cell.flags = self.cursor.flags;
@@ -865,6 +964,7 @@ impl Terminal {
             if self.cursor.col + 1 < cols {
                 let spacer = self.grid.cell_mut(self.cursor.col + 1, self.cursor.line);
                 spacer.c = ' ';
+                spacer.grapheme_key = 0;
                 spacer.flags = CellFlags::WIDE_SPACER;
                 spacer.hyperlink_id = self.current_hyperlink_id;
             }
@@ -900,6 +1000,13 @@ impl Terminal {
             Charset::DecSpecialGraphics => translate_dec_special(c),
             _ => c,
         }
+    }
+}
+
+impl Terminal {
+    /// Input a character with grapheme cluster support
+    pub fn input_grapheme(&mut self, c: char, grapheme_key: u32) {
+        self.write_char_with_grapheme(c, grapheme_key);
     }
 }
 
@@ -1155,6 +1262,14 @@ impl Handler for Terminal {
             Attr::CancelStrike => self.cursor.flags.remove(CellFlags::STRIKETHROUGH),
             Attr::Foreground(c) => self.cursor.fg = c,
             Attr::Background(c) => self.cursor.bg = c,
+            Attr::ForegroundIndex(idx) => {
+                // Use color palette for indexed colors
+                self.cursor.fg = Color::from_256_with_palette(idx, &self.color_palette);
+            }
+            Attr::BackgroundIndex(idx) => {
+                // Use color palette for indexed colors
+                self.cursor.bg = Color::from_256_with_palette(idx, &self.color_palette);
+            }
             Attr::DefaultForeground => self.cursor.fg = DEFAULT_FG,
             Attr::DefaultBackground => self.cursor.bg = DEFAULT_BG,
         }

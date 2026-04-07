@@ -48,6 +48,8 @@ pub struct TextRenderer {
     font: Font,
     bold_font: Option<Font>,
     italic_font: Option<Font>,
+    /// Bold-italic font (for when both flags are set)
+    bold_italic_font: Option<Font>,
     atlas: Atlas,
     /// Separate RGBA atlas for color emoji
     color_atlas: ColorAtlas,
@@ -77,6 +79,9 @@ impl TextRenderer {
         let italic_font = config.italic_font.as_ref()
             .and_then(|path| load_font_file(path))
             .and_then(|data| Font::from_bytes(&data, config.size));
+        let bold_italic_font = config.bold_italic_font.as_ref()
+            .and_then(|path| load_font_file(path))
+            .and_then(|data| Font::from_bytes(&data, config.size));
 
         let cell_width = font.cell_width();
         let cell_height = font.line_height();
@@ -89,6 +94,7 @@ impl TextRenderer {
             font,
             bold_font,
             italic_font,
+            bold_italic_font,
             atlas,
             color_atlas,
             cell_width,
@@ -149,9 +155,18 @@ impl TextRenderer {
 
     /// Get font for given flags
     fn get_font(&self, flags: CellFlags) -> &Font {
-        if flags.contains(CellFlags::BOLD) {
+        let is_bold = flags.contains(CellFlags::BOLD);
+        let is_italic = flags.contains(CellFlags::ITALIC);
+        
+        if is_bold && is_italic {
+            // Try bold-italic first, fall back to bold, then italic, then regular
+            self.bold_italic_font.as_ref()
+                .or(self.bold_font.as_ref())
+                .or(self.italic_font.as_ref())
+                .unwrap_or(&self.font)
+        } else if is_bold {
             self.bold_font.as_ref().unwrap_or(&self.font)
-        } else if flags.contains(CellFlags::ITALIC) {
+        } else if is_italic {
             self.italic_font.as_ref().unwrap_or(&self.font)
         } else {
             &self.font

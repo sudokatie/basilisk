@@ -257,7 +257,8 @@ impl TextRenderer {
         ]);
 
         // Render glyph if not a space
-        if cell.c != ' ' && cell.c != '\0' {
+        let c = cell.c();
+        if c != ' ' && c != '\0' {
             self.render_glyph(col, row, cell, fg_arr, bg_arr, vertices, indices);
         }
 
@@ -283,8 +284,9 @@ impl TextRenderer {
         vertices: &mut Vec<Vertex>,
         indices: &mut Vec<u32>,
     ) {
+        let c = cell.c();
         let flags = Self::glyph_flags(cell.flags);
-        let key = GlyphKey::new(cell.c, flags);
+        let key = GlyphKey::new(c, flags);
 
         // Cache glyph if needed - we need to handle the borrow carefully
         // First check if cached, then rasterize if needed
@@ -293,11 +295,11 @@ impl TextRenderer {
         } else {
             // Rasterize using the appropriate font
             let rasterized = if cell.flags.contains(CellFlags::BOLD) {
-                self.bold_font.as_ref().unwrap_or(&self.font).rasterize(cell.c)
+                self.bold_font.as_ref().unwrap_or(&self.font).rasterize(c)
             } else if cell.flags.contains(CellFlags::ITALIC) {
-                self.italic_font.as_ref().unwrap_or(&self.font).rasterize(cell.c)
+                self.italic_font.as_ref().unwrap_or(&self.font).rasterize(c)
             } else {
-                self.font.rasterize(cell.c)
+                self.font.rasterize(c)
             };
 
             // Now cache it

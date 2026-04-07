@@ -109,6 +109,8 @@ pub struct Terminal {
     current_hyperlink: Option<Hyperlink>,
     /// Working directory (OSC 7)
     working_directory: Option<String>,
+    /// Pending response to send back to PTY (e.g., from DECRQSS)
+    pending_response: Option<Vec<u8>>,
 }
 
 impl Terminal {
@@ -139,12 +141,24 @@ impl Terminal {
             sixel_decoder: SixelDecoder::new(),
             current_hyperlink: None,
             working_directory: None,
+            pending_response: None,
         }
     }
 
     /// Get terminal modes
     pub fn modes(&self) -> &TerminalModes {
         &self.modes
+    }
+
+    /// Take pending response (if any) to send back to PTY
+    /// This is used for sequences like DECRQSS that require a response
+    pub fn take_pending_response(&mut self) -> Option<Vec<u8>> {
+        self.pending_response.take()
+    }
+
+    /// Check if there's a pending response
+    pub fn has_pending_response(&self) -> bool {
+        self.pending_response.is_some()
     }
 
     /// Get mutable terminal modes
@@ -275,10 +289,23 @@ impl Terminal {
     }
 
     /// Handle DCS (Device Control String) sequences
-    fn handle_dcs(&mut self, params: &[u16], _intermediates: &[u8], data: &[u8]) {
-        // Check if this is a sixel sequence (DCS P1;P2;P3 q ...)
-        // The 'q' is typically consumed before we get here, so check data
+    fn handle_dcs(&mut self, params: &[u16], intermediates: &[u8], data: &[u8]) {
         if data.is_empty() {
+            return;
+        }
+
+        // Check for DECRQSS (DCS $ q Pt ST) - Request Status String
+        // intermediates will contain $ and data starts with the query
+        if intermediates.contains(&b'$') {
+            // DECRQSS query - data contains the query string (e.g., "m" for SGR)
+            if let Ok(query) = std::str::from_utf8(data) {
+                let query = query.trim_end_matches(|c| c == '\x1b' || c == '\\');
+                if let Some(response) = self.decrqss(query) {
+                    // Store response for the application to send back
+                    // The application should call get_pending_response() to retrieve it
+                    self.pending_response = Some(response);
+                }
+            }
             return;
         }
 
@@ -349,10 +376,33 @@ impl Terminal {
 
     /// Write a character at cursor position, advancing cursor
     fn write_char(&mut self, c: char) {
+        self.write_grapheme_char(c, None);
+    }
+
+    /// Write a grapheme cluster at cursor position
+    pub fn write_grapheme(&mut self, grapheme: &str) {
+        let mut chars = grapheme.chars();
+        if let Some(first) = chars.next() {
+            if chars.next().is_none() {
+                // Single character
+                self.write_grapheme_char(first, None);
+            } else {
+                // Multi-codepoint grapheme
+                self.write_grapheme_char(grapheme.chars().next().unwrap(), Some(grapheme));
+            }
+        }
+    }
+
+    /// Internal: write a character or grapheme cluster
+    fn write_grapheme_char(&mut self, c: char, grapheme: Option<&str>) {
         let cols = self.grid.cols();
 
         // Handle wide characters
-        let width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(1) as u16;
+        let width = if let Some(g) = grapheme {
+            unicode_width::UnicodeWidthStr::width(g) as u16
+        } else {
+            unicode_width::UnicodeWidthChar::width(c).unwrap_or(1) as u16
+        };
 
         // Check if we're at the right margin and need to wrap
         // This is "pending wrap" - cursor at last col means next char triggers wrap
@@ -365,9 +415,13 @@ impl Terminal {
             }
         }
 
-        // Write the character
+        // Write the character or grapheme
         let cell = self.grid.cell_mut(self.cursor.col, self.cursor.line);
-        cell.c = c;
+        if let Some(g) = grapheme {
+            cell.set_grapheme(g);
+        } else {
+            cell.set_char(c);
+        }
         cell.fg = self.cursor.fg;
         cell.bg = self.cursor.bg;
         cell.flags = self.cursor.flags;
@@ -377,7 +431,7 @@ impl Terminal {
             // Mark next cell as spacer
             if self.cursor.col + 1 < cols {
                 let spacer = self.grid.cell_mut(self.cursor.col + 1, self.cursor.line);
-                spacer.c = ' ';
+                spacer.set_char(' ');
                 spacer.flags = CellFlags::WIDE_SPACER;
             }
         }
@@ -746,6 +800,91 @@ impl Handler for Terminal {
         // Terminal just receives the request but doesn't act on it directly
         // for security reasons (per spec: "many terminals disable this by default")
     }
+
+    fn decrqss(&mut self, query: &str) -> Option<Vec<u8>> {
+        // DECRQSS - Request Selection or Setting
+        // Response format: DCS 1 $ r Pt ST (valid) or DCS 0 $ r ST (invalid)
+        // where Pt is the setting value
+
+        let response: String = match query {
+            // SGR - Select Graphic Rendition
+            "m" => {
+                // Build SGR sequence from current cursor attributes
+                let mut params: Vec<String> = Vec::new();
+
+                if self.cursor.flags.contains(CellFlags::BOLD) {
+                    params.push("1".to_string());
+                }
+                if self.cursor.flags.contains(CellFlags::DIM) {
+                    params.push("2".to_string());
+                }
+                if self.cursor.flags.contains(CellFlags::ITALIC) {
+                    params.push("3".to_string());
+                }
+                if self.cursor.flags.contains(CellFlags::UNDERLINE) {
+                    params.push("4".to_string());
+                }
+                if self.cursor.flags.contains(CellFlags::BLINK) {
+                    params.push("5".to_string());
+                }
+                if self.cursor.flags.contains(CellFlags::INVERSE) {
+                    params.push("7".to_string());
+                }
+                if self.cursor.flags.contains(CellFlags::HIDDEN) {
+                    params.push("8".to_string());
+                }
+                if self.cursor.flags.contains(CellFlags::STRIKETHROUGH) {
+                    params.push("9".to_string());
+                }
+
+                // Add foreground color (true color)
+                let fg = &self.cursor.fg;
+                params.push(format!("38;2;{};{};{}", fg.r, fg.g, fg.b));
+
+                // Add background color (true color)
+                let bg = &self.cursor.bg;
+                params.push(format!("48;2;{};{};{}", bg.r, bg.g, bg.b));
+
+                if params.is_empty() {
+                    "0m".to_string() // Reset/normal
+                } else {
+                    format!("{}m", params.join(";"))
+                }
+            }
+
+            // DECSTBM - Set Top and Bottom Margins
+            "r" => {
+                format!("{};{}r", self.scroll_top + 1, self.scroll_bottom + 1)
+            }
+
+            // DECSCUSR - Set Cursor Style (simplified)
+            " q" => {
+                // Return block cursor (style 2)
+                "2 q".to_string()
+            }
+
+            // DECSCL - Select Conformance Level
+            "\"p" => {
+                // Report VT500 level 4
+                "64;1\"p".to_string()
+            }
+
+            // DECSCA - Select Character Protection Attribute
+            "\"q" => {
+                // Report not protected
+                "0\"q".to_string()
+            }
+
+            // Unknown query
+            _ => {
+                // Return invalid response
+                return Some(b"\x1bP0$r\x1b\\".to_vec());
+            }
+        };
+
+        // Valid response: DCS 1 $ r <response> ST
+        Some(format!("\x1bP1$r{}\x1b\\", response).into_bytes())
+    }
 }
 
 #[cfg(test)]
@@ -763,7 +902,7 @@ mod tests {
     fn terminal_write_char() {
         let mut term = Terminal::new(80, 24, 1000);
         term.input('A');
-        assert_eq!(term.grid.cell(0, 0).c, 'A');
+        assert_eq!(term.grid.cell(0, 0).c(), 'A');
         assert_eq!(term.cursor.col, 1);
     }
 
@@ -786,8 +925,8 @@ mod tests {
     fn terminal_process_text() {
         let mut term = Terminal::new(80, 24, 1000);
         term.process(b"Hello");
-        assert_eq!(term.grid.cell(0, 0).c, 'H');
-        assert_eq!(term.grid.cell(4, 0).c, 'o');
+        assert_eq!(term.grid.cell(0, 0).c(), 'H');
+        assert_eq!(term.grid.cell(4, 0).c(), 'o');
         assert_eq!(term.cursor.col, 5);
     }
 
@@ -804,7 +943,7 @@ mod tests {
         let mut term = Terminal::new(80, 24, 1000);
         term.process(b"ABCDE");
         term.process(b"\x1b[H\x1b[2J"); // Home and clear screen
-        assert_eq!(term.grid.cell(0, 0).c, ' ');
+        assert_eq!(term.grid.cell(0, 0).c(), ' ');
     }
 
     #[test]
@@ -812,7 +951,7 @@ mod tests {
         let mut term = Terminal::new(80, 24, 1000);
         term.process(b"\x1b[1;31mRed"); // Bold red
         assert!(term.cursor.flags.contains(CellFlags::BOLD));
-        assert_eq!(term.grid.cell(0, 0).c, 'R');
+        assert_eq!(term.grid.cell(0, 0).c(), 'R');
     }
 
     #[test]

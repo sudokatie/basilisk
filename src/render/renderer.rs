@@ -107,8 +107,8 @@ impl Renderer {
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
         });
 
-        // Create atlas texture (1024x1024 grayscale)
-        let atlas_size = 1024u32;
+        // Create atlas texture (2048x2048 grayscale per spec)
+        let atlas_size = 2048u32;
         let atlas_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Atlas"),
             size: wgpu::Extent3d {

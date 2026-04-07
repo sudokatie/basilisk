@@ -153,6 +153,18 @@ pub trait Handler {
 
     /// Clipboard operation (OSC 52)
     fn clipboard(&mut self, clipboard: char, data: Option<&str>);
+
+    /// DECRQSS - Request Selection or Setting
+    /// Returns the response bytes to send back, or None if not supported
+    /// query is the parameter string (e.g., "m" for SGR, "r" for DECSTBM, "\"p" for DECSCL)
+    fn decrqss(&mut self, _query: &str) -> Option<Vec<u8>> {
+        None // Default: not supported
+    }
+
+    /// Write response back to the PTY (for queries like DECRQSS, DA, etc.)
+    fn write_response(&mut self, _response: &[u8]) {
+        // Default: do nothing (terminal implementations should override)
+    }
 }
 
 #[cfg(test)]

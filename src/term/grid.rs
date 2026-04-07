@@ -174,8 +174,8 @@ mod tests {
     #[test]
     fn grid_cell_access() {
         let mut grid = Grid::new(80, 24, 1000);
-        grid.cell_mut(0, 0).c = 'A';
-        assert_eq!(grid.cell(0, 0).c, 'A');
+        grid.cell_mut(0, 0).set_char('A');
+        assert_eq!(grid.cell(0, 0).c(), 'A');
     }
 
     #[test]
@@ -189,7 +189,7 @@ mod tests {
     #[test]
     fn grid_resize_shrink() {
         let mut grid = Grid::new(80, 24, 1000);
-        grid.cell_mut(0, 0).c = 'X';
+        grid.cell_mut(0, 0).set_char('X');
         grid.resize(60, 20);
         assert_eq!(grid.cols(), 60);
         assert_eq!(grid.lines(), 20);
@@ -200,19 +200,19 @@ mod tests {
     #[test]
     fn grid_scroll_up() {
         let mut grid = Grid::new(80, 24, 1000);
-        grid.cell_mut(0, 0).c = 'A';
+        grid.cell_mut(0, 0).set_char('A');
         grid.scroll_up(1);
         // First row moved to scrollback
         assert_eq!(grid.scrollback_len(), 1);
         // New first row is empty
-        assert_eq!(grid.cell(0, 0).c, ' ');
+        assert_eq!(grid.cell(0, 0).c(), ' ');
     }
 
     #[test]
     fn grid_scrollback_limit() {
         let mut grid = Grid::new(80, 24, 5);
         for i in 0..10 {
-            grid.cell_mut(0, 0).c = char::from(b'A' + i);
+            grid.cell_mut(0, 0).set_char(char::from(b'A' + i));
             grid.scroll_up(1);
         }
         // Scrollback limited to 5
@@ -222,22 +222,22 @@ mod tests {
     #[test]
     fn grid_clear_line() {
         let mut grid = Grid::new(80, 24, 1000);
-        grid.cell_mut(0, 5).c = 'X';
+        grid.cell_mut(0, 5).set_char('X');
         grid.clear_line(5);
-        assert_eq!(grid.cell(0, 5).c, ' ');
+        assert_eq!(grid.cell(0, 5).c(), ' ');
     }
 
     #[test]
     fn grid_clear_region() {
         let mut grid = Grid::new(80, 24, 1000);
         for col in 0..10 {
-            grid.cell_mut(col, 0).c = 'X';
+            grid.cell_mut(col, 0).set_char('X');
         }
         grid.clear_region((2, 0), (7, 0));
-        assert_eq!(grid.cell(0, 0).c, 'X');
-        assert_eq!(grid.cell(1, 0).c, 'X');
-        assert_eq!(grid.cell(2, 0).c, ' ');
-        assert_eq!(grid.cell(6, 0).c, ' ');
-        assert_eq!(grid.cell(7, 0).c, 'X');
+        assert_eq!(grid.cell(0, 0).c(), 'X');
+        assert_eq!(grid.cell(1, 0).c(), 'X');
+        assert_eq!(grid.cell(2, 0).c(), ' ');
+        assert_eq!(grid.cell(6, 0).c(), ' ');
+        assert_eq!(grid.cell(7, 0).c(), 'X');
     }
 }

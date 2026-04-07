@@ -13,7 +13,7 @@ use basilisk::Result;
 #[command(version)]
 struct Cli {
     /// Execute command instead of shell
-    #[arg(short, long)]
+    #[arg(short = 'e', long)]
     execute: Option<String>,
 
     /// Configuration file path
@@ -23,6 +23,14 @@ struct Cli {
     /// Keep terminal open after command exits
     #[arg(long)]
     hold: bool,
+
+    /// Working directory
+    #[arg(short = 'd', long = "working-directory")]
+    working_dir: Option<PathBuf>,
+
+    /// Window title
+    #[arg(short = 'T', long = "title")]
+    title: Option<String>,
 
     /// Attach to existing session
     #[command(subcommand)]
@@ -38,6 +46,12 @@ enum Command {
     },
     /// List sessions
     List,
+    /// Create a new named session
+    New {
+        /// Session name
+        #[arg(short, long)]
+        name: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -57,8 +71,45 @@ fn main() -> Result<()> {
     };
 
     // Override shell if -e specified
-    if let Some(cmd) = cli.execute {
-        config.terminal.shell = cmd;
+    // For -e, we wrap the command to handle --hold properly
+    if let Some(cmd) = &cli.execute {
+        if cli.hold {
+            // Wrap command to pause after exit
+            #[cfg(unix)]
+            {
+                // Use shell to run command and then wait for input on exit
+                config.terminal.shell = format!(
+                    "/bin/sh -c '{}; echo; echo \"[Process exited - press Enter to close]\"; read'",
+                    cmd.replace('\'', "'\\''")
+                );
+            }
+            #[cfg(not(unix))]
+            {
+                // On non-Unix, just set the command directly
+                config.terminal.shell = cmd.clone();
+            }
+        } else {
+            // Direct execution - wrap in shell for proper handling
+            #[cfg(unix)]
+            {
+                config.terminal.shell = format!("/bin/sh -c '{}'", cmd.replace('\'', "'\\''"));
+            }
+            #[cfg(not(unix))]
+            {
+                config.terminal.shell = cmd.clone();
+            }
+        }
+    }
+
+    // Change working directory if specified
+    if let Some(ref dir) = cli.working_dir {
+        if dir.exists() {
+            if let Err(e) = std::env::set_current_dir(dir) {
+                log::warn!("Failed to change working directory: {}", e);
+            }
+        } else {
+            log::warn!("Working directory does not exist: {:?}", dir);
+        }
     }
 
     match cli.command {
@@ -67,6 +118,14 @@ fn main() -> Result<()> {
         }
         Some(Command::Attach { session }) => {
             attach_session(session)?;
+        }
+        Some(Command::New { name }) => {
+            // Create new named session
+            let session_name = name.unwrap_or_else(|| {
+                format!("session-{}", std::process::id())
+            });
+            log::info!("Creating new session: {}", session_name);
+            App::run(config)?;
         }
         None => {
             // Launch terminal

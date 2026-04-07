@@ -151,8 +151,9 @@ impl Selection {
 
                     for col in col_start..=col_end.min(grid.cols().saturating_sub(1)) {
                         let cell = grid.cell(col, line);
-                        if cell.c != '\0' {
-                            result.push(cell.c);
+                        let c = cell.c();
+                        if c != '\0' {
+                            result.push(c);
                         }
                     }
 
@@ -180,8 +181,9 @@ impl Selection {
 
                     for col in min_col..=max_col.min(grid.cols().saturating_sub(1)) {
                         let cell = grid.cell(col, line);
-                        if cell.c != '\0' {
-                            result.push(cell.c);
+                        let c = cell.c();
+                        if c != '\0' {
+                            result.push(c);
                         }
                     }
 
@@ -198,8 +200,9 @@ impl Selection {
 
                     for col in 0..grid.cols() {
                         let cell = grid.cell(col, line);
-                        if cell.c != '\0' {
-                            result.push(cell.c);
+                        let c = cell.c();
+                        if c != '\0' {
+                            result.push(c);
                         }
                     }
 
@@ -374,7 +377,7 @@ mod tests {
 
         // Write "Hello" at line 1
         for (i, c) in "Hello".chars().enumerate() {
-            grid.cell_mut(i as u16, 1).c = c;
+            grid.cell_mut(i as u16, 1).set_char(c);
         }
 
         let mut sel = Selection::normal(0, 1);
@@ -389,10 +392,10 @@ mod tests {
         let mut grid = Grid::new(20, 5, 100);
 
         for (i, c) in "Line1".chars().enumerate() {
-            grid.cell_mut(i as u16, 0).c = c;
+            grid.cell_mut(i as u16, 0).set_char(c);
         }
         for (i, c) in "Line2".chars().enumerate() {
-            grid.cell_mut(i as u16, 1).c = c;
+            grid.cell_mut(i as u16, 1).set_char(c);
         }
 
         let mut sel = Selection::normal(0, 0);

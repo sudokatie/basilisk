@@ -10,9 +10,9 @@ fn terminal_echo_text() {
 
     // Check text appears in grid
     let grid = term.grid();
-    assert_eq!(grid.cell(0, 0).c, 'H');
-    assert_eq!(grid.cell(1, 0).c, 'e');
-    assert_eq!(grid.cell(12, 0).c, '!');
+    assert_eq!(grid.cell(0, 0).c(), 'H');
+    assert_eq!(grid.cell(1, 0).c(), 'e');
+    assert_eq!(grid.cell(12, 0).c(), '!');
 }
 
 #[test]
@@ -22,8 +22,8 @@ fn terminal_newline() {
     term.process(b"Line1\r\nLine2");
 
     let grid = term.grid();
-    assert_eq!(grid.cell(0, 0).c, 'L');
-    assert_eq!(grid.cell(0, 1).c, 'L');
+    assert_eq!(grid.cell(0, 0).c(), 'L');
+    assert_eq!(grid.cell(0, 1).c(), 'L');
 }
 
 #[test]
@@ -32,9 +32,9 @@ fn terminal_carriage_return() {
     term.process(b"XXXX\rYY");
 
     let grid = term.grid();
-    assert_eq!(grid.cell(0, 0).c, 'Y');
-    assert_eq!(grid.cell(1, 0).c, 'Y');
-    assert_eq!(grid.cell(2, 0).c, 'X');
+    assert_eq!(grid.cell(0, 0).c(), 'Y');
+    assert_eq!(grid.cell(1, 0).c(), 'Y');
+    assert_eq!(grid.cell(2, 0).c(), 'X');
 }
 
 #[test]
@@ -46,7 +46,7 @@ fn terminal_cursor_movement() {
     term.process(b"X");
 
     let grid = term.grid();
-    assert_eq!(grid.cell(10, 5).c, 'X');
+    assert_eq!(grid.cell(10, 5).c(), 'X');
 }
 
 #[test]
@@ -58,7 +58,7 @@ fn terminal_clear_screen() {
 
     let grid = term.grid();
     // Screen should be cleared
-    assert_eq!(grid.cell(0, 0).c, ' ');
+    assert_eq!(grid.cell(0, 0).c(), ' ');
 }
 
 #[test]
@@ -93,10 +93,10 @@ fn terminal_erase_in_line() {
     term.process(b"\x1b[K"); // Erase to end of line
 
     let grid = term.grid();
-    assert_eq!(grid.cell(0, 0).c, 'A');
-    assert_eq!(grid.cell(2, 0).c, 'C');
-    assert_eq!(grid.cell(3, 0).c, ' '); // Erased
-    assert_eq!(grid.cell(7, 0).c, ' '); // Erased
+    assert_eq!(grid.cell(0, 0).c(), 'A');
+    assert_eq!(grid.cell(2, 0).c(), 'C');
+    assert_eq!(grid.cell(3, 0).c(), ' '); // Erased
+    assert_eq!(grid.cell(7, 0).c(), ' '); // Erased
 }
 
 #[test]
@@ -119,7 +119,7 @@ fn terminal_resize() {
     term.process(b"Hello");
     
     // Get cell content before resize
-    let before = term.grid().cell(0, 0).c;
+    let before = term.grid().cell(0, 0).c();
     assert_eq!(before, 'H');
     
     term.resize(40, 12);
@@ -137,9 +137,9 @@ fn terminal_tab() {
     term.process(b"A\tB");
 
     let grid = term.grid();
-    assert_eq!(grid.cell(0, 0).c, 'A');
+    assert_eq!(grid.cell(0, 0).c(), 'A');
     // Tab moves to column 8
-    assert_eq!(grid.cell(8, 0).c, 'B');
+    assert_eq!(grid.cell(8, 0).c(), 'B');
 }
 
 #[test]
@@ -152,7 +152,7 @@ fn terminal_save_restore_cursor() {
     term.process(b"X");
 
     let grid = term.grid();
-    assert_eq!(grid.cell(9, 4).c, 'X'); // Back at saved position
+    assert_eq!(grid.cell(9, 4).c(), 'X'); // Back at saved position
 }
 
 #[test]
@@ -210,10 +210,10 @@ fn parser_osc_sequence() {
 fn grid_cell_access() {
     let mut grid = Grid::new(80, 24, 1000);
     
-    grid.cell_mut(10, 5).c = 'X';
+    grid.cell_mut(10, 5).set_char('X');
     grid.cell_mut(10, 5).flags = CellFlags::BOLD;
     
-    assert_eq!(grid.cell(10, 5).c, 'X');
+    assert_eq!(grid.cell(10, 5).c(), 'X');
     assert!(grid.cell(10, 5).flags.contains(CellFlags::BOLD));
 }
 
@@ -223,7 +223,7 @@ fn grid_scroll() {
     
     // Write to first line
     for (i, c) in "FirstLine".chars().enumerate() {
-        grid.cell_mut(i as u16, 0).c = c;
+        grid.cell_mut(i as u16, 0).set_char(c);
     }
     
     // Scroll up
@@ -232,5 +232,5 @@ fn grid_scroll() {
     // First line should be in scrollback
     assert_eq!(grid.scrollback_len(), 1);
     // New first line should be empty
-    assert_eq!(grid.cell(0, 0).c, ' ');
+    assert_eq!(grid.cell(0, 0).c(), ' ');
 }

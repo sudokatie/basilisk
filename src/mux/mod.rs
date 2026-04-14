@@ -8,6 +8,7 @@ pub mod window;
 pub mod session;
 pub mod ipc;
 pub mod multiplexer;
+pub mod persist;
 
 pub use pane::{Pane, PaneId};
 pub use window::{Window, WindowId, SplitDirection};
@@ -15,3 +16,4 @@ pub use layout::{Layout, Rect};
 pub use session::{Session, SessionId};
 pub use ipc::{SessionServer, SessionClient, IpcMessage, list_sessions, session_socket_path};
 pub use multiplexer::Multiplexer;
+pub use persist::{PersistedSession, PersistedWindow, PaneScrollback, ExternalMux};

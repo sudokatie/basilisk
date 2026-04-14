@@ -3,11 +3,11 @@
 //! Handles reading, writing, and verifying host keys against the known_hosts file.
 
 use crate::error::{Error, Result};
-use russh_keys::key::PublicKey;
+use russh_keys::PublicKey;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Action to take when encountering a host key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,7 +103,7 @@ impl KnownHosts {
                 } else {
                     HostKeyVerification::Changed {
                         fingerprint,
-                        expected_fingerprint: format!("{}:{}", key_type, &known_key[..16]),
+                        expected_fingerprint: format!("{}:{}...", key_type, &known_key[..known_key.len().min(16)]),
                     }
                 }
             } else {
@@ -191,38 +191,30 @@ impl KnownHosts {
 
 /// Get SSH key type string.
 fn key_type_string(key: &PublicKey) -> String {
-    match key {
-        PublicKey::Ed25519(_) => "ssh-ed25519".to_string(),
-        PublicKey::RSA { .. } => "ssh-rsa".to_string(),
-        PublicKey::EC { ref key } => {
-            match key.ident() {
-                "nistp256" => "ecdsa-sha2-nistp256".to_string(),
-                "nistp384" => "ecdsa-sha2-nistp384".to_string(),
-                "nistp521" => "ecdsa-sha2-nistp521".to_string(),
-                other => format!("ecdsa-sha2-{}", other),
-            }
+    match key.algorithm() {
+        russh_keys::Algorithm::Ed25519 => "ssh-ed25519".to_string(),
+        russh_keys::Algorithm::Rsa { .. } => "ssh-rsa".to_string(),
+        russh_keys::Algorithm::Ecdsa { curve } => {
+            format!("ecdsa-sha2-{}", curve.as_str())
         }
+        _ => "unknown".to_string(),
     }
 }
 
 /// Convert public key to base64.
 fn key_to_base64(key: &PublicKey) -> String {
-    use base64::Engine;
-    let bytes = key.public_key_bytes();
-    base64::engine::general_purpose::STANDARD.encode(bytes)
+    // Use OpenSSH format and extract the base64 part
+    let openssh = key.to_openssh().unwrap_or_default();
+    // Format: "key-type base64data comment"
+    openssh.split_whitespace()
+        .nth(1)
+        .unwrap_or(&openssh)
+        .to_string()
 }
 
 /// Get key fingerprint (SHA256).
 fn key_fingerprint(key: &PublicKey) -> String {
-    use std::hash::{Hash, Hasher};
-    use std::collections::hash_map::DefaultHasher;
-    
-    // Simple fingerprint for display (real impl would use SHA256)
-    let bytes = key.public_key_bytes();
-    let mut hasher = DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    let hash = hasher.finish();
-    format!("SHA256:{:016x}", hash)
+    key.fingerprint(russh_keys::HashAlg::Sha256).to_string()
 }
 
 // Unix-specific file permissions

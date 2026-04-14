@@ -8,11 +8,11 @@ mod auth;
 mod client;
 mod known_hosts;
 
-pub use auth::{AuthMethod, KeyPair};
-pub use client::{SshClient, SshConfig, SshSession, SshChannel};
+pub use auth::{AuthMethod, SshKeyPair};
+pub use client::{SshClient, SshConfig, SshSession};
 pub use known_hosts::{KnownHosts, HostKeyVerification, HostKeyAction};
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use std::path::PathBuf;
 
 /// Default SSH port.
@@ -47,6 +47,8 @@ impl SshTarget {
 
     /// Parse from user@host:port format.
     pub fn parse(s: &str) -> Result<Self> {
+        use crate::error::Error;
+        
         // Format: [user@]host[:port]
         let (user_part, rest) = if let Some(idx) = s.find('@') {
             (Some(&s[..idx]), &s[idx + 1..])
@@ -111,7 +113,6 @@ pub fn default_identity_files() -> Vec<PathBuf> {
         dir.join("id_ed25519"),
         dir.join("id_rsa"),
         dir.join("id_ecdsa"),
-        dir.join("id_dsa"),
     ]
 }
 

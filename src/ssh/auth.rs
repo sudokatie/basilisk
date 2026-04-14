@@ -3,19 +3,19 @@
 //! Supports key-based and password authentication.
 
 use crate::error::{Error, Result};
-use russh_keys::key::{KeyPair as RusshKeyPair, PublicKey};
-use russh_keys::load_secret_key;
+use russh_keys::key::PrivateKeyWithHashAlg;
+use russh_keys::PrivateKey;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// SSH key pair wrapper.
 #[derive(Clone)]
-pub struct KeyPair {
-    inner: Arc<RusshKeyPair>,
+pub struct SshKeyPair {
+    inner: Arc<PrivateKey>,
     path: Option<PathBuf>,
 }
 
-impl KeyPair {
+impl SshKeyPair {
     /// Load a key pair from file.
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         Self::load_with_passphrase(path, None)
@@ -27,9 +27,18 @@ impl KeyPair {
         passphrase: Option<&str>,
     ) -> Result<Self> {
         let path = path.as_ref();
-        let key = load_secret_key(path, passphrase).map_err(|e| {
-            Error::Ssh(format!("failed to load key {}: {}", path.display(), e))
+        let key_data = std::fs::read_to_string(path).map_err(|e| {
+            Error::Ssh(format!("failed to read key {}: {}", path.display(), e))
         })?;
+
+        let key = if let Some(pass) = passphrase {
+            PrivateKey::from_openssh(&key_data)
+                .and_then(|k| k.decrypt(pass.as_bytes()))
+                .map_err(|e| Error::Ssh(format!("failed to decrypt key: {}", e)))?
+        } else {
+            PrivateKey::from_openssh(&key_data)
+                .map_err(|e| Error::Ssh(format!("failed to parse key {}: {}", path.display(), e)))?
+        };
 
         Ok(Self {
             inner: Arc::new(key),
@@ -37,17 +46,13 @@ impl KeyPair {
         })
     }
 
-    /// Get the public key.
-    pub fn public_key(&self) -> PublicKey {
-        self.inner.clone_public_key().expect("key has public component")
-    }
-
-    /// Get the key type name.
-    pub fn key_type(&self) -> &'static str {
-        match &*self.inner {
-            RusshKeyPair::Ed25519(_) => "ed25519",
-            RusshKeyPair::RSA { .. } => "rsa",
-            RusshKeyPair::EC { .. } => "ecdsa",
+    /// Get the key algorithm name.
+    pub fn algorithm(&self) -> &'static str {
+        match self.inner.algorithm() {
+            russh_keys::Algorithm::Ed25519 => "ed25519",
+            russh_keys::Algorithm::Rsa { .. } => "rsa",
+            russh_keys::Algorithm::Ecdsa { .. } => "ecdsa",
+            _ => "unknown",
         }
     }
 
@@ -56,16 +61,17 @@ impl KeyPair {
         self.path.as_deref()
     }
 
-    /// Get the inner key pair for russh.
-    pub(crate) fn inner(&self) -> Arc<RusshKeyPair> {
-        Arc::clone(&self.inner)
+    /// Get the inner key for russh authentication.
+    pub(crate) fn to_auth_key(&self) -> Result<PrivateKeyWithHashAlg> {
+        PrivateKeyWithHashAlg::new(Arc::clone(&self.inner), None)
+            .map_err(|e| Error::Ssh(format!("failed to create auth key: {}", e)))
     }
 }
 
-impl std::fmt::Debug for KeyPair {
+impl std::fmt::Debug for SshKeyPair {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("KeyPair")
-            .field("type", &self.key_type())
+        f.debug_struct("SshKeyPair")
+            .field("algorithm", &self.algorithm())
             .field("path", &self.path)
             .finish()
     }
@@ -77,14 +83,14 @@ pub enum AuthMethod {
     /// Key-based authentication.
     PublicKey {
         /// Key pairs to try.
-        keys: Vec<KeyPair>,
+        keys: Vec<SshKeyPair>,
     },
     /// Password authentication.
     Password {
         /// The password.
         password: String,
     },
-    /// Try agent, then keys, then password.
+    /// Try keys, then password.
     Auto {
         /// Key files to try.
         key_files: Vec<PathBuf>,
@@ -98,7 +104,7 @@ pub enum AuthMethod {
 impl AuthMethod {
     /// Create key-based auth from a single key file.
     pub fn key(path: impl AsRef<Path>) -> Result<Self> {
-        let key = KeyPair::load(path)?;
+        let key = SshKeyPair::load(path)?;
         Ok(Self::PublicKey { keys: vec![key] })
     }
 
@@ -106,7 +112,7 @@ impl AuthMethod {
     pub fn keys(paths: impl IntoIterator<Item = impl AsRef<Path>>) -> Result<Self> {
         let keys: Result<Vec<_>> = paths
             .into_iter()
-            .map(|p| KeyPair::load(p))
+            .map(|p| SshKeyPair::load(p))
             .collect();
         Ok(Self::PublicKey { keys: keys? })
     }
@@ -135,7 +141,7 @@ impl AuthMethod {
     }
 
     /// Load keys for this auth method.
-    pub fn load_keys(&self) -> Vec<KeyPair> {
+    pub fn load_keys(&self) -> Vec<SshKeyPair> {
         match self {
             Self::PublicKey { keys } => keys.clone(),
             Self::Auto { key_files, .. } => {
@@ -143,7 +149,7 @@ impl AuthMethod {
                     .iter()
                     .filter_map(|p| {
                         if p.exists() {
-                            KeyPair::load(p).ok()
+                            SshKeyPair::load(p).ok()
                         } else {
                             None
                         }
@@ -173,7 +179,6 @@ impl Default for AuthMethod {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
     #[test]
     fn test_auth_method_password() {
@@ -185,7 +190,6 @@ mod tests {
     #[test]
     fn test_auth_method_auto() {
         let auth = AuthMethod::auto();
-        // Keys may or may not exist, but method should work
         match auth {
             AuthMethod::Auto { key_files, password } => {
                 assert!(!key_files.is_empty());
@@ -206,13 +210,5 @@ mod tests {
         let auth = AuthMethod::None;
         assert!(auth.password_value().is_none());
         assert!(auth.load_keys().is_empty());
-    }
-
-    #[test]
-    fn test_key_type_display() {
-        // Can't easily test KeyPair::key_type without actual keys,
-        // but we can verify the method exists
-        let auth = AuthMethod::default();
-        let _ = auth.load_keys(); // Should not panic
     }
 }

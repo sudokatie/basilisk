@@ -4,9 +4,11 @@
 
 use super::{AuthMethod, HostKeyAction, HostKeyVerification, KnownHosts, SshTarget};
 use crate::error::{Error, Result};
+use async_trait::async_trait;
 use russh::client::{self, Config, Handle, Handler, Msg};
-use russh::{Channel, ChannelId, ChannelMsg, Disconnect};
-use russh_keys::PublicKey;
+use russh::{Channel, ChannelId, Disconnect};
+// PublicKey from ssh_key crate (re-exported by russh_keys)
+type SshPublicKey = russh_keys::ssh_key::PublicKey;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -84,11 +86,56 @@ struct SshHandler {
     state: Arc<Mutex<SessionState>>,
 }
 
+#[async_trait]
 impl Handler for SshHandler {
     type Error = SshError;
 
-    // Use default implementation for now - accepts all keys
-    // TODO: Add proper host key verification
+    async fn check_server_key(
+        &mut self,
+        server_public_key: &SshPublicKey,
+    ) -> std::result::Result<bool, Self::Error> {
+        let mut state = self.state.lock().await;
+
+        // Skip verification if disabled
+        if !state.config.verify_host_key {
+            return Ok(true);
+        }
+
+        // Convert to russh_keys::PublicKey for our verification
+        let pub_key: russh_keys::PublicKey = server_public_key.clone();
+        
+        let verification = state.known_hosts.verify(
+            &state.target.host,
+            state.target.port,
+            &pub_key,
+        );
+
+        match verification {
+            HostKeyVerification::Verified => Ok(true),
+            HostKeyVerification::Unknown { fingerprint } => {
+                let host = state.target.host.clone();
+                let port = state.target.port;
+                let action = (state.config.on_unknown_host)(&host, &fingerprint);
+                state.host_key_action = Some(action);
+                
+                match action {
+                    HostKeyAction::Accept => Ok(true),
+                    HostKeyAction::AcceptAndSave => {
+                        state.known_hosts.add(&host, port, &pub_key);
+                        Ok(true)
+                    }
+                    HostKeyAction::Reject => Ok(false),
+                }
+            }
+            HostKeyVerification::Changed { fingerprint, expected_fingerprint } => {
+                Err(SshError(Error::Ssh(format!(
+                    "HOST KEY CHANGED for {}: got {}, expected {}. \
+                     Possible MITM attack!",
+                    state.target.host, fingerprint, expected_fingerprint
+                ))))
+            }
+        }
+    }
 }
 
 /// Active SSH session.
@@ -329,9 +376,48 @@ mod tests {
         assert_eq!(action, HostKeyAction::AcceptAndSave);
     }
 
+    #[test]
+    fn test_ssh_config_reject_default() {
+        let config = SshConfig::default();
+        let action = (config.on_unknown_host)("host", "fp");
+        assert_eq!(action, HostKeyAction::Reject);
+    }
+
+    #[test]
+    fn test_ssh_config_insecure_accepts() {
+        let config = SshConfig::insecure();
+        let action = (config.on_unknown_host)("host", "fp");
+        assert_eq!(action, HostKeyAction::Accept);
+    }
+
+    #[test]
+    fn test_ssh_config_keepalive() {
+        let config = SshConfig::default();
+        assert_eq!(config.keepalive_secs, 60);
+    }
+
     #[tokio::test]
     async fn test_client_creation() {
         let client = SshClient::with_config(SshConfig::insecure());
         assert!(client.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_client_default() {
+        let client = SshClient::new();
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn test_ssh_error_display() {
+        let err = SshError(Error::Ssh("test error".to_string()));
+        assert!(err.to_string().contains("test error"));
+    }
+
+    #[test]
+    fn test_ssh_error_from_russh() {
+        let russh_err = russh::Error::Disconnect;
+        let err: SshError = russh_err.into();
+        assert!(err.0.to_string().contains("SSH error"));
     }
 }

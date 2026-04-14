@@ -446,12 +446,6 @@ impl Session {
         }
     }
 
-    /// Apply stored color palette to a newly created pane
-    fn apply_palette_to_pane(&self, pane: &mut Pane) {
-        if let Some(ref palette) = self.color_palette {
-            pane.set_color_palette(palette.clone());
-        }
-    }
 }
 
 #[cfg(test)]
@@ -536,7 +530,7 @@ mod tests {
 
     #[test]
     fn session_find_pane() {
-        let mut session = Session::with_window(SessionId::new(1), "test".into(), 80, 24);
+        let session = Session::with_window(SessionId::new(1), "test".into(), 80, 24);
 
         let pane_id = session.active_pane().unwrap().id();
         let found = session.find_pane(pane_id);

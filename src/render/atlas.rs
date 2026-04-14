@@ -370,7 +370,7 @@ impl Atlas {
     }
 
     /// Allocate space for a glyph, returns (x, y, row_index)
-    fn allocate(&mut self, width: u32, height: u32) -> Option<(u32, u32, usize)> {
+    pub fn allocate(&mut self, width: u32, height: u32) -> Option<(u32, u32, usize)> {
         let padded_width = width + self.padding;
         let padded_height = height + self.padding;
 

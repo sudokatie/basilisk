@@ -1,10 +1,18 @@
 //! Performance benchmarks for Basilisk terminal emulator
 //!
 //! Run with: cargo bench
+//!
+//! Performance targets from SPECS.md:
+//! - Frame time: < 1ms (1000+ FPS potential)
+//! - Input latency: < 5ms keyboard-to-screen
+//! - Memory: < 100MB base (+ scrollback)
+//! - Startup: < 100ms to first frame
+//! - Throughput: > 1GB/s terminal output
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 
 /// Benchmark parser throughput
+/// Target: > 1GB/s
 fn bench_parser(c: &mut Criterion) {
     use basilisk::ansi::Parser;
 
@@ -51,7 +59,7 @@ fn bench_parser(c: &mut Criterion) {
 
 /// Benchmark terminal grid operations
 fn bench_grid(c: &mut Criterion) {
-    use basilisk::term::grid::Grid;
+    use basilisk::term::Grid;
 
     let mut group = c.benchmark_group("grid");
 
@@ -89,6 +97,7 @@ fn bench_grid(c: &mut Criterion) {
 }
 
 /// Benchmark terminal processing (parser + grid updates)
+/// Target: > 1GB/s throughput
 fn bench_terminal(c: &mut Criterion) {
     use basilisk::term::Terminal;
 
@@ -121,47 +130,116 @@ fn bench_terminal(c: &mut Criterion) {
         })
     });
 
+    // Rapid scrolling benchmark
+    group.bench_function("rapid_scrolling", |b| {
+        let scroll_content = "\n".repeat(10000);
+        b.iter(|| {
+            let mut term = Terminal::new(80, 24, 10000);
+            term.process(black_box(scroll_content.as_bytes()));
+        })
+    });
+
     group.finish();
 }
 
-/// Benchmark atlas operations
+/// Benchmark glyph atlas operations
 fn bench_atlas(c: &mut Criterion) {
-    use basilisk::render::atlas::{Atlas, GlyphKey};
+    use basilisk::render::Atlas;
 
     let mut group = c.benchmark_group("atlas");
 
-    group.bench_function("lookup_cached", |b| {
-        let mut atlas = Atlas::new(2048, 2048);
-        // Pre-cache some glyphs
-        for c in 'A'..='Z' {
-            atlas.glyphs.insert(GlyphKey::regular(c), basilisk::render::atlas::GlyphInfo {
-                atlas_x: 0,
-                atlas_y: 0,
-                width: 10,
-                height: 16,
-                metrics: basilisk::render::glyph::GlyphMetrics {
-                    advance_width: 10.0,
-                    width: 10,
-                    height: 16,
-                    xmin: 0,
-                    ymin: 0,
-                },
-            });
-        }
-
+    group.bench_function("allocate_glyphs", |b| {
         b.iter(|| {
-            for c in 'A'..='Z' {
-                black_box(atlas.get(&GlyphKey::regular(c)));
+            let mut atlas = Atlas::new(2048, 2048);
+            // Simulate allocating space for ASCII charset
+            for _ in 0..95 {
+                black_box(atlas.allocate(12, 20));
             }
         })
     });
 
-    group.bench_function("allocate_space", |b| {
+    group.bench_function("lru_eviction_pressure", |b| {
         b.iter(|| {
-            let mut atlas = Atlas::new(2048, 2048);
-            for _ in 0..100 {
+            let mut atlas = Atlas::new(512, 512); // Small atlas to trigger eviction
+            for i in 0..500 {
+                atlas.advance_frame();
                 black_box(atlas.allocate(20, 30));
+                // Touch some allocations to affect LRU
+                if i % 10 == 0 {
+                    atlas.advance_frame();
+                }
             }
+        })
+    });
+
+    group.finish();
+}
+
+/// Benchmark sixel decoding
+fn bench_sixel(c: &mut Criterion) {
+    use basilisk::render::sixel::SixelDecoder;
+
+    let mut group = c.benchmark_group("sixel");
+
+    // Generate a simple sixel image (solid color block)
+    let mut sixel_data = Vec::new();
+    sixel_data.extend_from_slice(b"#0;2;100;0;0"); // Define red color
+    for _ in 0..100 {
+        sixel_data.extend_from_slice(b"~~~~~~"); // 6 pixels wide
+        sixel_data.push(b'-'); // New sixel row
+    }
+
+    group.throughput(Throughput::Bytes(sixel_data.len() as u64));
+    group.bench_function("decode_simple_image", |b| {
+        b.iter(|| {
+            let mut decoder = SixelDecoder::new();
+            decoder.decode(black_box(&sixel_data));
+        })
+    });
+
+    // Complex sixel with color changes
+    let mut complex_sixel = Vec::new();
+    for color in 0..16 {
+        complex_sixel.extend_from_slice(format!("#{}~", color).as_bytes());
+    }
+    let complex_sixel_repeated: Vec<u8> = complex_sixel.iter().cycle().take(10000).copied().collect();
+
+    group.throughput(Throughput::Bytes(complex_sixel_repeated.len() as u64));
+    group.bench_function("decode_color_changes", |b| {
+        b.iter(|| {
+            let mut decoder = SixelDecoder::new();
+            decoder.decode(black_box(&complex_sixel_repeated));
+        })
+    });
+
+    group.finish();
+}
+
+/// Memory usage estimation
+fn bench_memory(c: &mut Criterion) {
+    use basilisk::term::Terminal;
+
+    let mut group = c.benchmark_group("memory");
+
+    // Create terminal with various scrollback sizes
+    group.bench_function("terminal_1k_scrollback", |b| {
+        b.iter(|| {
+            let term = Terminal::new(80, 24, 1000);
+            black_box(term);
+        })
+    });
+
+    group.bench_function("terminal_10k_scrollback", |b| {
+        b.iter(|| {
+            let term = Terminal::new(80, 24, 10000);
+            black_box(term);
+        })
+    });
+
+    group.bench_function("terminal_100k_scrollback", |b| {
+        b.iter(|| {
+            let term = Terminal::new(80, 24, 100000);
+            black_box(term);
         })
     });
 
@@ -174,5 +252,7 @@ criterion_group!(
     bench_grid,
     bench_terminal,
     bench_atlas,
+    bench_sixel,
+    bench_memory,
 );
 criterion_main!(benches);

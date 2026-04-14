@@ -17,7 +17,7 @@ use crate::term::selection::{SelectionManager, SelectionType};
 use crate::term::scrollback::ScrollbackView;
 use crate::term::MouseMode;
 use crate::clipboard::Clipboard;
-use crate::input::bindings::{Bindings, KeyCombo, Action as BindingAction};
+use crate::input::bindings::Bindings;
 use std::sync::Mutex;
 use crate::{Error, Result};
 
@@ -30,6 +30,7 @@ pub struct App {
     session: Option<Session>,
     clipboard: Arc<Mutex<Clipboard>>,
     selection: SelectionManager,
+    #[allow(dead_code)] // Reserved for custom keybinding support
     bindings: Bindings,
     
     // Prefix mode state (for tmux-like keybindings)
@@ -1054,6 +1055,9 @@ impl App {
         // Update cursor blink
         pane.terminal_mut().update_cursor_blink();
 
+        // Update cell blink (for SGR 5 blinking text)
+        text_renderer.update_cell_blink();
+
         // Generate vertices from terminal grid
         let (mut vertices, mut indices) = text_renderer.render_grid(
             pane.terminal().grid(),
@@ -1277,7 +1281,7 @@ impl App {
                     // Resize terminal
                     if let Some(session) = &mut self.session {
                         if let Some(pane) = session.active_pane_mut() {
-                            pane.resize(cols, rows);
+                            let _ = pane.resize(cols, rows);
                         }
                     }
                 }
@@ -1361,7 +1365,10 @@ impl ApplicationHandler for App {
 
         // Create text renderer
         match TextRenderer::new(&self.config.font) {
-            Ok(r) => self.text_renderer = Some(r),
+            Ok(mut r) => {
+                r.set_padding(self.config.window.padding as f32);
+                self.text_renderer = Some(r);
+            }
             Err(e) => {
                 log::error!("Failed to create text renderer: {}", e);
                 event_loop.exit();

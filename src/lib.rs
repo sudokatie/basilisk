@@ -13,6 +13,8 @@ pub mod input;
 pub mod config;
 pub mod app;
 pub mod clipboard;
+pub mod window;
+pub mod ssh;
 
 pub use error::{Error, Result};
 pub use app::App;

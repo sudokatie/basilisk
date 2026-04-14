@@ -1,5 +1,7 @@
 //! Text rendering - connects terminal grid to GPU renderer
 
+use std::time::{Duration, Instant};
+
 use crate::config::{ColorScheme, FontConfig};
 use crate::term::cell::{Cell, CellFlags, Color};
 use crate::term::cursor::{Cursor, CursorShape};
@@ -58,8 +60,16 @@ pub struct TextRenderer {
     ascent: f32,
     screen_width: f32,
     screen_height: f32,
+    /// Window padding in pixels
+    padding: f32,
     /// Hyperlink color
     hyperlink_color: Color,
+    /// Cell blink state (for SGR 5 blinking text)
+    cell_blink_visible: bool,
+    /// Last cell blink toggle time
+    cell_blink_last_toggle: Instant,
+    /// Cell blink interval
+    cell_blink_interval: Duration,
 }
 
 impl TextRenderer {
@@ -88,7 +98,7 @@ impl TextRenderer {
         let ascent = font.ascent();
 
         let atlas = Atlas::new(2048, 2048);
-        let color_atlas = ColorAtlas::new(1024, 1024);
+        let color_atlas = ColorAtlas::new(2048, 2048);
 
         Ok(Self {
             font,
@@ -102,7 +112,11 @@ impl TextRenderer {
             ascent,
             screen_width: 800.0,
             screen_height: 600.0,
+            padding: 0.0,
             hyperlink_color: Color::rgb(100, 149, 237), // Cornflower blue
+            cell_blink_visible: true,
+            cell_blink_last_toggle: Instant::now(),
+            cell_blink_interval: Duration::from_millis(530),
         })
     }
 
@@ -119,6 +133,34 @@ impl TextRenderer {
     pub fn set_screen_size(&mut self, width: f32, height: f32) {
         self.screen_width = width;
         self.screen_height = height;
+    }
+
+    /// Set window padding
+    pub fn set_padding(&mut self, padding: f32) {
+        self.padding = padding;
+    }
+
+    /// Get current padding
+    pub fn padding(&self) -> f32 {
+        self.padding
+    }
+
+    /// Update cell blink state - call each frame
+    /// Returns true if visibility changed
+    pub fn update_cell_blink(&mut self) -> bool {
+        let now = Instant::now();
+        if now.duration_since(self.cell_blink_last_toggle) >= self.cell_blink_interval {
+            self.cell_blink_visible = !self.cell_blink_visible;
+            self.cell_blink_last_toggle = now;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Check if blinking cells should be visible
+    pub fn cell_blink_visible(&self) -> bool {
+        self.cell_blink_visible
     }
 
     /// Check if atlas needs upload
@@ -214,6 +256,7 @@ impl TextRenderer {
     }
 
     /// Render a grid cell to vertices
+    #[allow(dead_code)] // Kept for reference; render_cell_with_search is used instead
     fn render_cell(
         &mut self,
         col: u16,
@@ -233,9 +276,9 @@ impl TextRenderer {
             return;
         }
 
-        // Calculate cell position
-        let x = col as f32 * self.cell_width;
-        let y = row as f32 * self.cell_height;
+        // Calculate cell position (with padding offset)
+        let x = self.padding + col as f32 * self.cell_width;
+        let y = self.padding + row as f32 * self.cell_height;
 
         let cell_w = if cell.flags.contains(CellFlags::WIDE) {
             self.cell_width * 2.0
@@ -460,9 +503,9 @@ impl TextRenderer {
             return; // Empty glyph (space)
         }
 
-        // Calculate glyph position
-        let cell_x = col as f32 * self.cell_width;
-        let cell_y = row as f32 * self.cell_height;
+        // Calculate glyph position (with padding offset)
+        let cell_x = self.padding + col as f32 * self.cell_width;
+        let cell_y = self.padding + row as f32 * self.cell_height;
 
         let glyph_x = cell_x + glyph_info.metrics.xmin as f32;
         let glyph_y = cell_y + self.ascent - glyph_info.metrics.ymin as f32 - glyph_info.height as f32;
@@ -545,6 +588,7 @@ impl TextRenderer {
     }
 
     /// Render strikethrough decoration
+    #[allow(dead_code)] // Called from render_cell which is kept for reference
     fn render_strikethrough(
         &mut self,
         x: f32,
@@ -661,9 +705,9 @@ impl TextRenderer {
             return;
         }
 
-        // Calculate cell position
-        let x = col as f32 * self.cell_width;
-        let y = row as f32 * self.cell_height;
+        // Calculate cell position (with padding offset)
+        let x = self.padding + col as f32 * self.cell_width;
+        let y = self.padding + row as f32 * self.cell_height;
 
         let cell_w = if cell.flags.contains(CellFlags::WIDE) {
             self.cell_width * 2.0
@@ -718,6 +762,11 @@ impl TextRenderer {
 
         // Handle hidden
         if cell.flags.contains(CellFlags::HIDDEN) {
+            fg = bg;
+        }
+
+        // Handle blink - hide text when blink is in "off" phase
+        if cell.flags.contains(CellFlags::BLINK) && !self.cell_blink_visible {
             fg = bg;
         }
 
@@ -989,8 +1038,8 @@ impl TextRenderer {
         vertices: &mut Vec<Vertex>,
         indices: &mut Vec<u32>,
     ) {
-        let x = col as f32 * self.cell_width;
-        let y = row as f32 * self.cell_height;
+        let x = self.padding + col as f32 * self.cell_width;
+        let y = self.padding + row as f32 * self.cell_height;
 
         // Use a distinctive color for copy mode cursor (yellow outline)
         let cursor_color = [1.0, 1.0, 0.0, 0.8];

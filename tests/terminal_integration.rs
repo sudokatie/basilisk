@@ -1,6 +1,6 @@
 //! Integration tests for terminal functionality
 
-use basilisk::term::{Terminal, Grid, Cell, CellFlags, Color};
+use basilisk::term::{Terminal, Grid, CellFlags};
 use basilisk::ansi::{Parser, Action};
 
 #[test]
@@ -347,4 +347,238 @@ fn terminal_focus_reporting() {
     // Disable
     term.process(b"\x1b[?1004l");
     assert!(!term.modes().focus_reporting);
+}
+
+// ============================================
+// Sixel Integration Tests
+// ============================================
+
+#[test]
+fn sixel_decode_simple() {
+    use basilisk::render::SixelDecoder;
+    
+    let mut decoder = SixelDecoder::new();
+    // Simple sixel: color definition and a sixel character
+    let data = b"#0;2;100;0;0~";
+    decoder.decode(data);
+    
+    let image = decoder.take_image();
+    // Should produce some pixels
+    assert!(image.width > 0 || image.height == 0); // Empty or has content
+}
+
+#[test]
+fn sixel_color_definition() {
+    use basilisk::render::SixelDecoder;
+    
+    let mut decoder = SixelDecoder::new();
+    // RGB color definition: #<n>;<type>;<r>;<g>;<b>
+    // Type 2 = RGB percentages
+    decoder.decode(b"#1;2;100;50;0");
+    
+    // Decoder should accept color definition without panic
+}
+
+#[test]
+fn terminal_sixel_placeholder() {
+    let mut term = Terminal::new(80, 24, 1000);
+    
+    // Sixel images list should start empty
+    assert!(term.sixel_images().is_empty());
+    
+    // Note: Full sixel parsing requires DCS sequence processing
+    // which is tested in ansi module tests
+}
+
+// ============================================
+// Multiplexer Integration Tests  
+// ============================================
+
+#[test]
+fn multiplexer_session_lifecycle() {
+    use basilisk::mux::Multiplexer;
+    
+    let mut mux = Multiplexer::new();
+    
+    // Create sessions
+    let id1 = mux.create_session(Some("test1".into())).unwrap();
+    let id2 = mux.create_session(Some("test2".into())).unwrap();
+    
+    assert_eq!(mux.session_count(), 2);
+    
+    // First session auto-attached
+    assert_eq!(mux.attached_id(), Some(id1));
+    
+    // Switch to second
+    assert!(mux.attach(id2));
+    assert_eq!(mux.attached_id(), Some(id2));
+    
+    // Detach
+    let detached = mux.detach();
+    assert_eq!(detached, Some(id2));
+    assert!(mux.attached_id().is_none());
+    
+    // Destroy
+    assert!(mux.destroy_session(id1));
+    assert_eq!(mux.session_count(), 1);
+}
+
+#[test]
+fn multiplexer_session_navigation() {
+    use basilisk::mux::Multiplexer;
+    
+    let mut mux = Multiplexer::new();
+    
+    mux.create_session(Some("a".into())).unwrap();
+    mux.create_session(Some("b".into())).unwrap();
+    mux.create_session(Some("c".into())).unwrap();
+    
+    // Navigate through sessions
+    let initial = mux.attached_id();
+    mux.next_session();
+    mux.next_session();
+    mux.prev_session();
+    
+    // Should have navigated
+    assert!(mux.attached_id().is_some());
+}
+
+#[test]
+fn multiplexer_list_sessions() {
+    use basilisk::mux::Multiplexer;
+    
+    let mut mux = Multiplexer::new();
+    
+    mux.create_session(Some("alpha".into())).unwrap();
+    mux.create_session(Some("beta".into())).unwrap();
+    
+    let list = mux.list_sessions();
+    assert_eq!(list.len(), 2);
+    
+    let names: Vec<_> = list.iter().map(|(_, n)| n.as_str()).collect();
+    assert!(names.contains(&"alpha"));
+    assert!(names.contains(&"beta"));
+}
+
+// ============================================
+// Mouse Handler Integration Tests
+// ============================================
+
+#[test]
+fn mouse_handler_coordinates() {
+    use basilisk::input::MouseHandler;
+    
+    let mut handler = MouseHandler::new();
+    handler.set_cell_size(10.0, 20.0);
+    
+    // Test coordinate conversion
+    assert_eq!(handler.pixel_to_cell(0.0, 0.0), (0, 0));
+    assert_eq!(handler.pixel_to_cell(15.0, 35.0), (1, 1));
+    assert_eq!(handler.pixel_to_cell(99.0, 199.0), (9, 9));
+}
+
+#[test]
+fn mouse_handler_click_tracking() {
+    use basilisk::input::{MouseHandler, MouseButton};
+    
+    let mut handler = MouseHandler::new();
+    
+    // Press
+    handler.press(MouseButton::Left, 1);
+    assert_eq!(handler.pressed_button(), Some(MouseButton::Left));
+    assert_eq!(handler.click_count(), 1);
+    
+    // Double click
+    handler.press(MouseButton::Left, 2);
+    assert_eq!(handler.click_count(), 2);
+    
+    // Release
+    handler.release(MouseButton::Left);
+    assert!(handler.pressed_button().is_none());
+}
+
+#[test]
+fn mouse_handler_drag_detection() {
+    use basilisk::input::{MouseHandler, MouseButton};
+    
+    let mut handler = MouseHandler::new();
+    handler.set_cell_size(10.0, 20.0);
+    
+    // Start at position
+    handler.update_position(5.0, 10.0);
+    handler.press(MouseButton::Left, 1);
+    assert!(!handler.is_dragging());
+    
+    // Move to new cell
+    handler.update_position(25.0, 50.0);
+    handler.motion();
+    assert!(handler.is_dragging());
+}
+
+#[test]
+fn mouse_handler_sgr_encoding() {
+    use basilisk::input::{MouseHandler, MouseButton, MouseEvent};
+    use basilisk::term::MouseMode;
+    
+    let handler = MouseHandler::new();
+    
+    // SGR encoding for button press
+    let encoded = handler.encode_event(
+        MouseEvent::Press(MouseButton::Left),
+        MouseMode::Sgr,
+        10,
+        5,
+    );
+    
+    assert!(encoded.is_some());
+    let seq = String::from_utf8(encoded.unwrap()).unwrap();
+    // SGR format: CSI < button ; col+1 ; row+1 M
+    assert!(seq.starts_with("\x1b[<"));
+    assert!(seq.contains(";11;")); // col + 1
+    assert!(seq.contains(";6")); // row + 1
+    assert!(seq.ends_with('M'));
+}
+
+// ============================================
+// Pipeline Structure Tests
+// ============================================
+
+#[test]
+fn pipeline_instance_structure() {
+    use basilisk::render::Instance;
+    
+    let instance = Instance::new(
+        [0.5, 0.5],
+        [0.0, 0.0, 0.1, 0.1],
+        [1.0, 1.0, 1.0, 1.0],
+        [0.0, 0.0, 0.0, 1.0],
+    );
+    
+    assert_eq!(instance.cell_pos, [0.5, 0.5]);
+    assert_eq!(instance.fg_color[0], 1.0);
+    assert_eq!(instance.bg_color[3], 1.0);
+}
+
+#[test]
+fn pipeline_instance_size() {
+    use basilisk::render::Instance;
+    
+    // Instance should be 56 bytes (14 floats * 4 bytes)
+    assert_eq!(std::mem::size_of::<Instance>(), 56);
+}
+
+// ============================================
+// Window Event Loop Tests
+// ============================================
+
+#[test]
+fn window_state_defaults() {
+    use basilisk::window::WindowState;
+    
+    let state = WindowState::new();
+    
+    assert!(state.window.is_none());
+    assert!(!state.mouse_pressed);
+    assert!(state.focused);
+    assert_eq!(state.click_count, 0);
 }

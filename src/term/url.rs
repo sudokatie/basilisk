@@ -48,7 +48,7 @@ pub fn detect_urls_in_line(text: &str, row: u16) -> Vec<DetectedUrl> {
 }
 
 /// Detect URLs in a grid
-pub fn detect_urls_in_grid<F>(rows: u16, cols: u16, get_line: F) -> Vec<DetectedUrl>
+pub fn detect_urls_in_grid<F>(rows: u16, _cols: u16, get_line: F) -> Vec<DetectedUrl>
 where
     F: Fn(u16) -> String,
 {

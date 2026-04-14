@@ -45,7 +45,9 @@ pub struct Renderer {
     atlas_texture: wgpu::Texture,
     atlas_bind_group: wgpu::BindGroup,
     /// Color atlas for emoji (RGBA)
+    #[allow(dead_code)] // Reserved for color emoji rendering
     color_atlas_texture: wgpu::Texture,
+    #[allow(dead_code)] // Reserved for color emoji rendering
     color_atlas_bind_group: wgpu::BindGroup,
     /// Dynamic image textures for sixel/kitty images
     image_textures: Vec<ImageTexture>,
@@ -129,8 +131,8 @@ impl Renderer {
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
         });
 
-        // Create atlas texture (1024x1024 grayscale)
-        let atlas_size = 1024u32;
+        // Create atlas texture (2048x2048 grayscale) - must match Atlas::new() in text.rs
+        let atlas_size = 2048u32;
         let atlas_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Atlas"),
             size: wgpu::Extent3d {

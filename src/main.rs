@@ -168,13 +168,18 @@ fn list_sessions() -> Result<()> {
 }
 
 /// Attach to an existing session
+#[cfg(unix)]
 fn attach_session(session: Option<String>) -> Result<()> {
+    use std::io::{Read, Write};
+    use std::os::unix::io::{AsRawFd, BorrowedFd};
+    use nix::sys::termios::{self, LocalFlags, InputFlags, OutputFlags, SetArg};
+    use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+
     let session_dir = session_directory();
     
     let session_name = match session {
         Some(name) => name,
         None => {
-            // Find first available session
             if !session_dir.exists() {
                 return Err(basilisk::Error::Config("No sessions available".into()));
             }
@@ -207,45 +212,103 @@ fn attach_session(session: Option<String>) -> Result<()> {
 
     println!("Attaching to session: {}", session_name);
     
-    // Connect to the session via Unix socket
-    let mut client = basilisk::mux::SessionClient::connect(&session_name)?;
+    // Save original terminal settings
+    let stdin_fd = std::io::stdin().as_raw_fd();
+    let stdin_borrowed = unsafe { BorrowedFd::borrow_raw(stdin_fd) };
+    let original_termios = termios::tcgetattr(&stdin_borrowed)
+        .map_err(|e| basilisk::Error::Pty(format!("Failed to get termios: {}", e)))?;
     
-    // Send attach request
+    // Set raw mode
+    let mut raw_termios = original_termios.clone();
+    raw_termios.local_flags.remove(
+        LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ISIG | LocalFlags::IEXTEN
+    );
+    raw_termios.input_flags.remove(
+        InputFlags::IXON | InputFlags::ICRNL | InputFlags::BRKINT | InputFlags::INPCK | InputFlags::ISTRIP
+    );
+    raw_termios.output_flags.remove(OutputFlags::OPOST);
+    
+    termios::tcsetattr(&stdin_borrowed, SetArg::TCSANOW, &raw_termios)
+        .map_err(|e| basilisk::Error::Pty(format!("Failed to set raw mode: {}", e)))?;
+
+    // Restore terminal on scope exit
+    struct TermiosGuard {
+        fd: i32,
+        termios: nix::sys::termios::Termios,
+    }
+    impl Drop for TermiosGuard {
+        fn drop(&mut self) {
+            let stdin_borrowed = unsafe { BorrowedFd::borrow_raw(self.fd) };
+            let _ = termios::tcsetattr(&stdin_borrowed, SetArg::TCSANOW, &self.termios);
+        }
+    }
+    let _guard = TermiosGuard { fd: stdin_fd, termios: original_termios };
+
+    // Connect to the session
+    let mut client = basilisk::mux::SessionClient::connect(&session_name)?;
     client.send(&basilisk::mux::IpcMessage::Attach)?;
     
-    // Wait for acknowledgment
     match client.recv()? {
         Some(basilisk::mux::IpcMessage::AttachAck { cols, rows }) => {
-            println!("Attached to session ({}x{})", cols, rows);
-            
-            // Enter raw mode and forward I/O
-            // This is a simplified implementation - full version would need
-            // proper terminal raw mode and signal handling
-            use std::io::{Read, Write};
+            eprintln!("Attached to session ({}x{})", cols, rows);
             
             client.set_nonblocking(true)?;
             
-            let stdin = std::io::stdin();
+            let mut stdin = std::io::stdin();
             let mut stdout = std::io::stdout();
-            let mut input_buf = [0u8; 1024];
+            let mut input_buf = [0u8; 4096];
             
+            // Main I/O loop
             loop {
-                // Check for input from stdin
-                // Note: This is simplified - real impl needs termios raw mode
+                // Use poll() to wait for input on stdin
+                let stdin_borrowed = unsafe { BorrowedFd::borrow_raw(stdin_fd) };
+                let mut poll_fds = [PollFd::new(stdin_borrowed, PollFlags::POLLIN)];
                 
-                // Check for output from session
+                match poll(&mut poll_fds, PollTimeout::from(10u16)) { // 10ms timeout
+                    Ok(n) if n > 0 => {
+                        // stdin has data
+                        if poll_fds[0].revents().map(|r| r.contains(PollFlags::POLLIN)).unwrap_or(false) {
+                            match stdin.read(&mut input_buf) {
+                                Ok(0) => break, // EOF
+                                Ok(n) => {
+                                    // Check for detach key (Ctrl+B d)
+                                    // For now, just forward all input
+                                    client.send(&basilisk::mux::IpcMessage::Input(input_buf[..n].to_vec()))?;
+                                }
+                                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                                Err(e) => {
+                                    log::warn!("Error reading stdin: {}", e);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Ok(_) => {} // Timeout
+                    Err(nix::errno::Errno::EINTR) => continue, // Interrupted, retry
+                    Err(e) => {
+                        log::error!("poll() error: {}", e);
+                        break;
+                    }
+                }
+                
+                // Check for output from session (non-blocking)
                 match client.recv() {
                     Ok(Some(basilisk::mux::IpcMessage::Output(data))) => {
                         stdout.write_all(&data)?;
                         stdout.flush()?;
                     }
                     Ok(Some(basilisk::mux::IpcMessage::SessionEnd)) => {
-                        println!("\nSession ended.");
+                        eprintln!("\r\nSession ended.");
                         break;
                     }
+                    Ok(Some(basilisk::mux::IpcMessage::Resize { cols, rows })) => {
+                        // Could resize our terminal here
+                        log::info!("Session resized to {}x{}", cols, rows);
+                    }
                     Ok(_) => {}
-                    Err(_) => {
-                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    Err(ref e) if e.to_string().contains("WouldBlock") => {}
+                    Err(e) => {
+                        log::warn!("Error receiving from session: {}", e);
                     }
                 }
             }
@@ -259,6 +322,11 @@ fn attach_session(session: Option<String>) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(not(unix))]
+fn attach_session(_session: Option<String>) -> Result<()> {
+    Err(basilisk::Error::Config("Session attach not supported on this platform".into()))
 }
 
 /// Get the session directory path

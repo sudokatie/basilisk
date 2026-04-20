@@ -196,6 +196,73 @@ impl Default for ColorScheme {
     }
 }
 
+impl ColorScheme {
+    /// Parse a hex color string to RGB
+    fn parse_hex(&self, hex: &str) -> (u8, u8, u8) {
+        let hex = hex.trim_start_matches('#');
+        if hex.len() >= 6 {
+            let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(255);
+            let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(255);
+            let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(255);
+            (r, g, b)
+        } else {
+            (255, 255, 255)
+        }
+    }
+
+    /// Build a 256-color palette with the first 16 colors from config
+    pub fn build_palette(&self) -> Vec<crate::term::cell::Color> {
+        use crate::term::cell::Color;
+        
+        let mut palette = Vec::with_capacity(256);
+        
+        // Standard 16 colors from config
+        let colors = [
+            &self.black,
+            &self.red,
+            &self.green,
+            &self.yellow,
+            &self.blue,
+            &self.magenta,
+            &self.cyan,
+            &self.white,
+            &self.bright_black,
+            &self.bright_red,
+            &self.bright_green,
+            &self.bright_yellow,
+            &self.bright_blue,
+            &self.bright_magenta,
+            &self.bright_cyan,
+            &self.bright_white,
+        ];
+
+        for hex in colors {
+            let (r, g, b) = self.parse_hex(hex);
+            palette.push(Color::rgb(r, g, b));
+        }
+
+        // 216 color cube (16-231)
+        for r in 0..6 {
+            for g in 0..6 {
+                for b in 0..6 {
+                    let rv = if r == 0 { 0 } else { 55 + r * 40 };
+                    let gv = if g == 0 { 0 } else { 55 + g * 40 };
+                    let bv = if b == 0 { 0 } else { 55 + b * 40 };
+                    palette.push(Color::rgb(rv, gv, bv));
+                }
+            }
+        }
+
+        // 24 grayscale colors (232-255)
+        for i in 0..24 {
+            let gray = 8 + i * 10;
+            palette.push(Color::rgb(gray, gray, gray));
+        }
+
+        palette
+    }
+}
+
 impl Default for ScrollbackConfig {
     fn default() -> Self {
         Self { lines: 10000 }

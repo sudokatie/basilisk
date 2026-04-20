@@ -8,8 +8,37 @@ use crate::render::window::{KeyCode, Modifiers};
 pub struct KeyboardHandler {
     /// Application cursor key mode (DECCKM)
     pub application_cursor: bool,
-    /// Application keypad mode (DECPAM)
+    /// Application keypad mode (DECPAM/DECPNM)
     pub application_keypad: bool,
+    /// Bracketed paste mode
+    pub bracketed_paste: bool,
+}
+
+impl KeyboardHandler {
+    /// Sync modes from terminal state
+    pub fn sync_modes(&mut self, modes: &crate::term::terminal::TerminalModes) {
+        self.application_cursor = modes.application_cursor;
+        self.application_keypad = modes.application_keypad;
+        self.bracketed_paste = modes.bracketed_paste;
+    }
+
+    /// Get bracketed paste start sequence
+    pub fn bracketed_paste_start(&self) -> Option<&'static [u8]> {
+        if self.bracketed_paste {
+            Some(b"\x1b[200~")
+        } else {
+            None
+        }
+    }
+
+    /// Get bracketed paste end sequence
+    pub fn bracketed_paste_end(&self) -> Option<&'static [u8]> {
+        if self.bracketed_paste {
+            Some(b"\x1b[201~")
+        } else {
+            None
+        }
+    }
 }
 
 impl KeyboardHandler {
@@ -17,6 +46,7 @@ impl KeyboardHandler {
         Self {
             application_cursor: false,
             application_keypad: false,
+            bracketed_paste: false,
         }
     }
 

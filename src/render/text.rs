@@ -467,6 +467,84 @@ impl TextRenderer {
 
         (vertices, indices)
     }
+
+    /// Render grid with viewport offset for scrollback viewing
+    pub fn render_grid_with_viewport(
+        &mut self,
+        grid: &Grid,
+        cursor: &Cursor,
+        selection: &SelectionManager,
+        colors: &ColorScheme,
+        viewport_offset: usize,
+        viewing_scrollback: bool,
+    ) -> (Vec<Vertex>, Vec<u32>) {
+        // If not viewing scrollback, use standard render
+        if viewport_offset == 0 {
+            return self.render_grid(grid, cursor, selection, colors);
+        }
+
+        let mut vertices = Vec::with_capacity(grid.cols() as usize * grid.lines() as usize * 8);
+        let mut indices = Vec::with_capacity(grid.cols() as usize * grid.lines() as usize * 12);
+
+        let default_fg = Self::parse_hex_color(&colors.foreground);
+        let default_bg = Self::parse_hex_color(&colors.background);
+        let cursor_color = Self::parse_hex_color(&colors.cursor);
+
+        let scrollback_len = grid.scrollback_len();
+        let grid_lines = grid.lines() as usize;
+
+        for display_row in 0..grid.lines() {
+            // Calculate which actual row to display
+            let total_row = display_row as usize + (scrollback_len.saturating_sub(viewport_offset));
+
+            for col in 0..grid.cols() {
+                let cell = if total_row < scrollback_len {
+                    // Row is in scrollback
+                    grid.scrollback_row(scrollback_len - total_row - 1)
+                        .and_then(|row| row.cells.get(col as usize))
+                } else {
+                    // Row is in visible grid
+                    let grid_row = total_row - scrollback_len;
+                    if grid_row < grid_lines {
+                        Some(grid.cell(col, grid_row as u16))
+                    } else {
+                        None
+                    }
+                };
+
+                let cell = match cell {
+                    Some(c) => c,
+                    None => continue,
+                };
+
+                // Don't show cursor when viewing scrollback
+                let cursor_here = false;
+                let selected = selection.is_selected(col, display_row);
+
+                self.render_cell(
+                    col,
+                    display_row,
+                    cell,
+                    cursor_here,
+                    selected,
+                    &default_fg,
+                    &default_bg,
+                    &cursor_color,
+                    &mut vertices,
+                    &mut indices,
+                );
+            }
+        }
+
+        // Render scrollback indicator at top-right
+        if viewing_scrollback {
+            // Add a simple indicator - render "SCROLLBACK" or similar
+            // For now, we just modify the top-right cell's background
+            // A more complete implementation would render text
+        }
+
+        (vertices, indices)
+    }
 }
 
 #[cfg(test)]

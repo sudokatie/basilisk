@@ -54,18 +54,26 @@ pub struct SixelPlacement {
 pub struct TerminalModes {
     /// DECCKM - Application cursor keys
     pub application_cursor: bool,
+    /// DECKPAM/DECKPNM - Application keypad mode
+    pub application_keypad: bool,
     /// DECAWM - Auto-wrap mode
     pub auto_wrap: bool,
     /// DECOM - Origin mode (cursor relative to scroll region)
     pub origin_mode: bool,
     /// DECTCEM - Cursor visible
     pub cursor_visible: bool,
+    /// LNM - Line feed/new line mode
+    pub linefeed_mode: bool,
     /// Bracketed paste mode
     pub bracketed_paste: bool,
     /// Focus reporting
     pub focus_reporting: bool,
     /// Mouse tracking modes
     pub mouse_tracking: MouseMode,
+    /// Alternate screen active
+    pub alternate_screen: bool,
+    /// Save cursor on alternate screen switch
+    pub save_cursor_on_switch: bool,
 }
 
 /// Mouse tracking mode
@@ -81,21 +89,46 @@ pub enum MouseMode {
 }
 
 /// Active hyperlink
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hyperlink {
     pub id: Option<String>,
     pub url: String,
 }
 
+/// Bell event for notification
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BellEvent {
+    /// Visual bell - flash the screen
+    Visual,
+    /// Audible bell - system beep
+    Audible,
+    /// Both visual and audible
+    Both,
+}
+
 /// Complete terminal state
 pub struct Terminal {
+    /// Primary screen grid
     grid: Grid,
+    /// Alternate screen grid (for vim, less, etc.)
+    alternate_grid: Option<Grid>,
+    /// Current cursor
     cursor: Cursor,
-    parser: Parser,
+    /// Saved cursor for primary screen
     saved_cursor: Option<SavedCursor>,
+    /// Saved cursor for alternate screen
+    alternate_saved_cursor: Option<SavedCursor>,
+    /// Parser state
+    parser: Parser,
+    /// Window title
     title: String,
+    /// Icon name
+    icon_name: String,
+    /// Scroll region top
     scroll_top: u16,
+    /// Scroll region bottom
     scroll_bottom: u16,
+    /// Tab stops
     tab_stops: Vec<bool>,
     /// UTF-8 decoding buffer for incomplete sequences
     utf8_buffer: Vec<u8>,
@@ -107,10 +140,23 @@ pub struct Terminal {
     sixel_decoder: SixelDecoder,
     /// Current hyperlink (OSC 8)
     current_hyperlink: Option<Hyperlink>,
+    /// Hyperlink storage per cell (col, line) -> hyperlink
+    cell_hyperlinks: std::collections::HashMap<(u16, u16), Hyperlink>,
     /// Working directory (OSC 7)
     working_directory: Option<String>,
     /// Pending response to send back to PTY (e.g., from DECRQSS)
     pending_response: Option<Vec<u8>>,
+    /// Pending bell event
+    pending_bell: Option<BellEvent>,
+    /// Scrollback viewport offset (0 = live view, >0 = viewing history)
+    viewport_offset: usize,
+    /// Terminal dimensions
+    cols: u16,
+    rows: u16,
+    /// Scrollback limit
+    scrollback_limit: usize,
+    /// Configurable color palette (ANSI 0-255)
+    color_palette: Option<Vec<Color>>,
 }
 
 impl Terminal {
@@ -124,10 +170,13 @@ impl Terminal {
 
         Self {
             grid: Grid::new(cols, rows, scrollback),
+            alternate_grid: None,
             cursor: Cursor::new(),
-            parser: Parser::new(),
             saved_cursor: None,
+            alternate_saved_cursor: None,
+            parser: Parser::new(),
             title: String::new(),
+            icon_name: String::new(),
             scroll_top: 0,
             scroll_bottom: rows.saturating_sub(1),
             tab_stops,
@@ -140,9 +189,31 @@ impl Terminal {
             sixel_images: Vec::new(),
             sixel_decoder: SixelDecoder::new(),
             current_hyperlink: None,
+            cell_hyperlinks: std::collections::HashMap::new(),
             working_directory: None,
             pending_response: None,
+            pending_bell: None,
+            viewport_offset: 0,
+            cols,
+            rows,
+            scrollback_limit: scrollback,
+            color_palette: None,
         }
+    }
+
+    /// Set custom color palette
+    pub fn set_color_palette(&mut self, palette: Vec<Color>) {
+        self.color_palette = Some(palette);
+    }
+
+    /// Get color from palette or default
+    pub fn get_palette_color(&self, index: u8) -> Color {
+        if let Some(ref palette) = self.color_palette {
+            if (index as usize) < palette.len() {
+                return palette[index as usize];
+            }
+        }
+        Color::from_256(index)
     }
 
     /// Get terminal modes
@@ -150,8 +221,12 @@ impl Terminal {
         &self.modes
     }
 
+    /// Get mutable terminal modes
+    pub fn modes_mut(&mut self) -> &mut TerminalModes {
+        &mut self.modes
+    }
+
     /// Take pending response (if any) to send back to PTY
-    /// This is used for sequences like DECRQSS that require a response
     pub fn take_pending_response(&mut self) -> Option<Vec<u8>> {
         self.pending_response.take()
     }
@@ -161,9 +236,14 @@ impl Terminal {
         self.pending_response.is_some()
     }
 
-    /// Get mutable terminal modes
-    pub fn modes_mut(&mut self) -> &mut TerminalModes {
-        &mut self.modes
+    /// Take pending bell event
+    pub fn take_pending_bell(&mut self) -> Option<BellEvent> {
+        self.pending_bell.take()
+    }
+
+    /// Check if there's a pending bell
+    pub fn has_pending_bell(&self) -> bool {
+        self.pending_bell.is_some()
     }
 
     /// Get sixel images
@@ -181,13 +261,125 @@ impl Terminal {
         self.current_hyperlink.as_ref()
     }
 
+    /// Get hyperlink at cell position
+    pub fn get_cell_hyperlink(&self, col: u16, line: u16) -> Option<&Hyperlink> {
+        self.cell_hyperlinks.get(&(col, line))
+    }
+
     /// Get working directory
     pub fn working_directory(&self) -> Option<&str> {
         self.working_directory.as_deref()
     }
 
+    /// Check if viewing scrollback (not live)
+    pub fn is_viewing_scrollback(&self) -> bool {
+        self.viewport_offset > 0
+    }
+
+    /// Get viewport offset
+    pub fn viewport_offset(&self) -> usize {
+        self.viewport_offset
+    }
+
+    /// Scroll viewport up (into history)
+    pub fn scroll_viewport_up(&mut self, lines: usize) {
+        let max_offset = self.grid.scrollback_len();
+        self.viewport_offset = (self.viewport_offset + lines).min(max_offset);
+    }
+
+    /// Scroll viewport down (toward live)
+    pub fn scroll_viewport_down(&mut self, lines: usize) {
+        self.viewport_offset = self.viewport_offset.saturating_sub(lines);
+    }
+
+    /// Reset viewport to live view
+    pub fn reset_viewport(&mut self) {
+        self.viewport_offset = 0;
+    }
+
+    /// Scroll viewport to top of scrollback
+    pub fn scroll_viewport_to_top(&mut self) {
+        self.viewport_offset = self.grid.scrollback_len();
+    }
+
+    /// Scroll viewport to bottom (live)
+    pub fn scroll_viewport_to_bottom(&mut self) {
+        self.viewport_offset = 0;
+    }
+
+    /// Check if on alternate screen
+    pub fn is_alternate_screen(&self) -> bool {
+        self.modes.alternate_screen
+    }
+
+    /// Switch to alternate screen buffer
+    fn switch_to_alternate(&mut self) {
+        if self.modes.alternate_screen {
+            return; // Already on alternate
+        }
+
+        // Save primary cursor
+        self.saved_cursor = Some(self.cursor.save());
+
+        // Create alternate grid if needed (no scrollback)
+        if self.alternate_grid.is_none() {
+            self.alternate_grid = Some(Grid::new(self.cols, self.rows, 0));
+        }
+
+        // Swap grids
+        if let Some(ref mut alt) = self.alternate_grid {
+            std::mem::swap(&mut self.grid, alt);
+        }
+
+        // Clear alternate screen
+        self.grid.clear();
+
+        // Reset cursor position
+        self.cursor = Cursor::new();
+
+        // Reset scroll region
+        self.scroll_top = 0;
+        self.scroll_bottom = self.rows.saturating_sub(1);
+
+        // Reset viewport
+        self.viewport_offset = 0;
+
+        self.modes.alternate_screen = true;
+    }
+
+    /// Switch back to primary screen buffer
+    fn switch_to_primary(&mut self) {
+        if !self.modes.alternate_screen {
+            return; // Already on primary
+        }
+
+        // Save alternate cursor
+        self.alternate_saved_cursor = Some(self.cursor.save());
+
+        // Swap grids back
+        if let Some(ref mut alt) = self.alternate_grid {
+            std::mem::swap(&mut self.grid, alt);
+        }
+
+        // Restore primary cursor
+        if let Some(ref saved) = self.saved_cursor {
+            self.cursor.restore(saved);
+        }
+
+        // Reset scroll region for primary
+        self.scroll_top = 0;
+        self.scroll_bottom = self.rows.saturating_sub(1);
+
+        self.modes.alternate_screen = false;
+    }
+
     /// Process input bytes with proper UTF-8 and grapheme cluster handling
     pub fn process(&mut self, bytes: &[u8]) {
+        // Reset viewport to live when receiving input
+        if self.viewport_offset > 0 {
+            self.viewport_offset = 0;
+        }
+
         // Append new bytes to buffer for UTF-8 continuation handling
         self.utf8_buffer.extend_from_slice(bytes);
         
@@ -284,6 +476,24 @@ impl Terminal {
             0x0B => self.linefeed(),       // VT (treated as LF)
             0x0C => self.linefeed(),       // FF (treated as LF)
             0x0D => self.carriage_return(), // CR
+            0x0E => {},                    // SO - shift out (ignored)
+            0x0F => {},                    // SI - shift in (ignored)
+            // ESC sequences that come through as execute
+            b'7' => self.save_cursor(),    // DECSC
+            b'8' => self.restore_cursor(), // DECRC
+            b'c' => self.reset(),          // RIS - full reset
+            b'D' => self.linefeed(),       // IND - index
+            b'E' => {                      // NEL - next line
+                self.carriage_return();
+                self.linefeed();
+            }
+            b'M' => self.reverse_index(),  // RI - reverse index
+            b'=' => {                      // DECKPAM - keypad application mode
+                self.modes.application_keypad = true;
+            }
+            b'>' => {                      // DECKPNM - keypad numeric mode
+                self.modes.application_keypad = false;
+            }
             _ => {}
         }
     }
@@ -295,32 +505,23 @@ impl Terminal {
         }
 
         // Check for DECRQSS (DCS $ q Pt ST) - Request Status String
-        // intermediates will contain $ and data starts with the query
         if intermediates.contains(&b'$') {
-            // DECRQSS query - data contains the query string (e.g., "m" for SGR)
             if let Ok(query) = std::str::from_utf8(data) {
                 let query = query.trim_end_matches(|c| c == '\x1b' || c == '\\');
                 if let Some(response) = self.decrqss(query) {
-                    // Store response for the application to send back
-                    // The application should call get_pending_response() to retrieve it
                     self.pending_response = Some(response);
                 }
             }
             return;
         }
 
-        // Sixel sequences: params are aspect ratio hints, data contains sixel commands
-        // Reset decoder for new image
+        // Sixel sequences
         self.sixel_decoder.reset();
-        
-        // Decode sixel data
         self.sixel_decoder.decode(data);
         
-        // Get the decoded image
         let image = self.sixel_decoder.image();
         
         if image.width > 0 && image.height > 0 {
-            // Place image at current cursor position
             let placement = SixelPlacement {
                 data: image.data.clone(),
                 width: image.width,
@@ -331,10 +532,7 @@ impl Terminal {
             
             self.sixel_images.push(placement);
             
-            // Advance cursor past the image (sixel spec says cursor moves down)
-            // Calculate how many rows the image occupies
-            // Assuming cell_height is roughly 16 pixels (we'd need actual metrics)
-            let cell_height = 16u32; // Default assumption
+            let cell_height = 16u32;
             let rows_needed = (image.height + cell_height - 1) / cell_height;
             
             for _ in 0..rows_needed {
@@ -343,9 +541,14 @@ impl Terminal {
         }
     }
 
-    /// Get the grid
+    /// Get the grid (returns visible grid based on viewport)
     pub fn grid(&self) -> &Grid {
         &self.grid
+    }
+
+    /// Get mutable grid
+    pub fn grid_mut(&mut self) -> &mut Grid {
+        &mut self.grid
     }
 
     /// Get the cursor
@@ -353,14 +556,33 @@ impl Terminal {
         &self.cursor
     }
 
+    /// Get mutable cursor
+    pub fn cursor_mut(&mut self) -> &mut Cursor {
+        &mut self.cursor
+    }
+
     /// Get the window title
     pub fn title(&self) -> &str {
         &self.title
     }
 
+    /// Get the icon name
+    pub fn icon_name(&self) -> &str {
+        &self.icon_name
+    }
+
     /// Resize the terminal
     pub fn resize(&mut self, cols: u16, rows: u16) {
+        self.cols = cols;
+        self.rows = rows;
+
         self.grid.resize(cols, rows);
+        
+        // Resize alternate grid if it exists
+        if let Some(ref mut alt) = self.alternate_grid {
+            alt.resize(cols, rows);
+        }
+
         self.scroll_bottom = rows.saturating_sub(1);
         
         // Resize tab stops
@@ -372,6 +594,9 @@ impl Terminal {
         // Clamp cursor
         self.cursor.col = self.cursor.col.min(cols.saturating_sub(1));
         self.cursor.line = self.cursor.line.min(rows.saturating_sub(1));
+
+        // Reset viewport
+        self.viewport_offset = 0;
     }
 
     /// Write a character at cursor position, advancing cursor
@@ -384,10 +609,8 @@ impl Terminal {
         let mut chars = grapheme.chars();
         if let Some(first) = chars.next() {
             if chars.next().is_none() {
-                // Single character
                 self.write_grapheme_char(first, None);
             } else {
-                // Multi-codepoint grapheme
                 self.write_grapheme_char(grapheme.chars().next().unwrap(), Some(grapheme));
             }
         }
@@ -405,13 +628,16 @@ impl Terminal {
         };
 
         // Check if we're at the right margin and need to wrap
-        // This is "pending wrap" - cursor at last col means next char triggers wrap
         if self.cursor.col >= cols {
-            self.cursor.col = 0;
-            if self.cursor.line >= self.scroll_bottom {
-                self.scroll_up(1);
+            if self.modes.auto_wrap {
+                self.cursor.col = 0;
+                if self.cursor.line >= self.scroll_bottom {
+                    self.scroll_up(1);
+                } else {
+                    self.cursor.line += 1;
+                }
             } else {
-                self.cursor.line += 1;
+                self.cursor.col = cols.saturating_sub(1);
             }
         }
 
@@ -426,9 +652,18 @@ impl Terminal {
         cell.bg = self.cursor.bg;
         cell.flags = self.cursor.flags;
 
+        // Store hyperlink for this cell if active
+        if let Some(ref hyperlink) = self.current_hyperlink {
+            self.cell_hyperlinks.insert(
+                (self.cursor.col, self.cursor.line),
+                hyperlink.clone()
+            );
+            // Mark cell as having hyperlink
+            cell.flags |= CellFlags::UNDERLINE; // Visual indication
+        }
+
         if width > 1 {
             cell.flags |= CellFlags::WIDE;
-            // Mark next cell as spacer
             if self.cursor.col + 1 < cols {
                 let spacer = self.grid.cell_mut(self.cursor.col + 1, self.cursor.line);
                 spacer.set_char(' ');
@@ -436,8 +671,38 @@ impl Terminal {
             }
         }
 
-        // Advance cursor (allow it to go past last col, triggers wrap on next char)
         self.cursor.col += width;
+    }
+
+    /// Get cell for rendering at viewport position
+    pub fn get_viewport_cell(&self, col: u16, viewport_row: u16) -> Option<&super::cell::Cell> {
+        if self.viewport_offset == 0 {
+            // Live view - just return grid cell
+            if viewport_row < self.grid.lines() && col < self.grid.cols() {
+                Some(self.grid.cell(col, viewport_row))
+            } else {
+                None
+            }
+        } else {
+            // Viewing scrollback
+            let scrollback_len = self.grid.scrollback_len();
+            let grid_lines = self.grid.lines() as usize;
+            let total_row = viewport_row as usize + (scrollback_len - self.viewport_offset);
+
+            if total_row < scrollback_len {
+                // Row is in scrollback
+                self.grid.scrollback_row(scrollback_len - total_row - 1)
+                    .and_then(|row| row.cells.get(col as usize))
+            } else {
+                // Row is in visible grid
+                let grid_row = total_row - scrollback_len;
+                if grid_row < grid_lines && (col as usize) < self.grid.cols() as usize {
+                    Some(self.grid.cell(col, grid_row as u16))
+                } else {
+                    None
+                }
+            }
+        }
     }
 }
 
@@ -447,12 +712,22 @@ impl Handler for Terminal {
     }
 
     fn goto(&mut self, line: u16, col: u16) {
-        self.cursor.line = line.min(self.grid.lines().saturating_sub(1));
+        let effective_line = if self.modes.origin_mode {
+            self.scroll_top + line
+        } else {
+            line
+        };
+        self.cursor.line = effective_line.min(self.grid.lines().saturating_sub(1));
         self.cursor.col = col.min(self.grid.cols().saturating_sub(1));
     }
 
     fn goto_line(&mut self, line: u16) {
-        self.cursor.line = line.min(self.grid.lines().saturating_sub(1));
+        let effective_line = if self.modes.origin_mode {
+            self.scroll_top + line
+        } else {
+            line
+        };
+        self.cursor.line = effective_line.min(self.grid.lines().saturating_sub(1));
     }
 
     fn goto_col(&mut self, col: u16) {
@@ -490,19 +765,20 @@ impl Handler for Terminal {
         let line = self.cursor.line;
         let col = self.cursor.col;
 
-        // Shift characters right
         for c in (col..cols.saturating_sub(n)).rev() {
             let src = self.grid.cell(c, line).clone();
             *self.grid.cell_mut(c + n, line) = src;
         }
 
-        // Clear inserted cells
         for c in col..(col + n).min(cols) {
             self.grid.cell_mut(c, line).reset();
         }
     }
 
     fn newline(&mut self) {
+        if self.modes.linefeed_mode {
+            self.carriage_return();
+        }
         self.linefeed();
     }
 
@@ -529,6 +805,7 @@ impl Handler for Terminal {
         let cols = self.grid.cols();
         for c in self.cursor.col..(self.cursor.col + n).min(cols) {
             self.grid.cell_mut(c, self.cursor.line).reset();
+            self.cell_hyperlinks.remove(&(c, self.cursor.line));
         }
     }
 
@@ -537,15 +814,18 @@ impl Handler for Terminal {
         let line = self.cursor.line;
         let col = self.cursor.col;
 
-        // Shift characters left
         for c in col..cols.saturating_sub(n) {
             let src = self.grid.cell(c + n, line).clone();
             *self.grid.cell_mut(c, line) = src;
+            // Move hyperlink if exists
+            if let Some(link) = self.cell_hyperlinks.remove(&(c + n, line)) {
+                self.cell_hyperlinks.insert((c, line), link);
+            }
         }
 
-        // Clear at end
         for c in cols.saturating_sub(n)..cols {
             self.grid.cell_mut(c, line).reset();
+            self.cell_hyperlinks.remove(&(c, line));
         }
     }
 
@@ -554,14 +834,15 @@ impl Handler for Terminal {
         let line = self.cursor.line;
 
         let (start, end) = match mode {
-            0 => (self.cursor.col, cols),        // Cursor to end
-            1 => (0, self.cursor.col + 1),       // Start to cursor
-            2 => (0, cols),                      // Entire line
+            0 => (self.cursor.col, cols),
+            1 => (0, self.cursor.col + 1),
+            2 => (0, cols),
             _ => return,
         };
 
         for c in start..end {
             self.grid.cell_mut(c, line).reset();
+            self.cell_hyperlinks.remove(&(c, line));
         }
     }
 
@@ -571,26 +852,32 @@ impl Handler for Terminal {
 
         match mode {
             0 => {
-                // Cursor to end of screen
                 self.erase_in_line(0);
                 for line in (self.cursor.line + 1)..rows {
                     self.grid.clear_line(line);
+                    for c in 0..cols {
+                        self.cell_hyperlinks.remove(&(c, line));
+                    }
                 }
             }
             1 => {
-                // Start to cursor
                 for line in 0..self.cursor.line {
                     self.grid.clear_line(line);
+                    for c in 0..cols {
+                        self.cell_hyperlinks.remove(&(c, line));
+                    }
                 }
                 self.erase_in_line(1);
             }
             2 => {
-                // Entire screen
                 self.grid.clear();
+                self.cell_hyperlinks.clear();
             }
             3 => {
-                // Entire screen + scrollback (not implemented)
+                // Clear screen and scrollback
                 self.grid.clear();
+                self.cell_hyperlinks.clear();
+                // Note: Grid doesn't expose clear_scrollback, would need to add
             }
             _ => {}
         }
@@ -602,9 +889,7 @@ impl Handler for Terminal {
             return;
         }
 
-        // Scroll region down
         for _ in 0..n {
-            // Move lines down
             for l in (line..self.scroll_bottom).rev() {
                 let row = self.grid.row(l).clone();
                 *self.grid.row_mut(l + 1) = row;
@@ -619,9 +904,7 @@ impl Handler for Terminal {
             return;
         }
 
-        // Scroll region up
         for _ in 0..n {
-            // Move lines up
             for l in line..self.scroll_bottom {
                 let row = self.grid.row(l + 1).clone();
                 *self.grid.row_mut(l) = row;
@@ -633,13 +916,11 @@ impl Handler for Terminal {
     fn clear_tab(&mut self, mode: u16) {
         match mode {
             0 => {
-                // Clear tab at cursor
                 if let Some(t) = self.tab_stops.get_mut(self.cursor.col as usize) {
                     *t = false;
                 }
             }
             3 => {
-                // Clear all tabs
                 self.tab_stops.fill(false);
             }
             _ => {}
@@ -681,15 +962,37 @@ impl Handler for Terminal {
     }
 
     fn bell(&mut self) {
-        // Bell not implemented - would notify user
+        self.pending_bell = Some(BellEvent::Both);
     }
 
     fn reset(&mut self) {
+        // Switch back to primary screen if on alternate
+        if self.modes.alternate_screen {
+            self.switch_to_primary();
+        }
+
         self.cursor = Cursor::new();
         self.grid.clear();
         self.scroll_top = 0;
         self.scroll_bottom = self.grid.lines().saturating_sub(1);
         self.title.clear();
+        self.icon_name.clear();
+        self.modes = TerminalModes {
+            cursor_visible: true,
+            auto_wrap: true,
+            ..Default::default()
+        };
+        self.cell_hyperlinks.clear();
+        self.current_hyperlink = None;
+        self.viewport_offset = 0;
+
+        // Reset tab stops
+        self.tab_stops.fill(false);
+        for i in (0..self.cols as usize).step_by(8) {
+            if i < self.tab_stops.len() {
+                self.tab_stops[i] = true;
+            }
+        }
     }
 
     fn save_cursor(&mut self) {
@@ -714,6 +1017,12 @@ impl Handler for Terminal {
         if self.scroll_top > self.scroll_bottom {
             std::mem::swap(&mut self.scroll_top, &mut self.scroll_bottom);
         }
+
+        // Move cursor to home if origin mode is set
+        if self.modes.origin_mode {
+            self.cursor.col = 0;
+            self.cursor.line = self.scroll_top;
+        }
     }
 
     fn scroll_up(&mut self, n: u16) {
@@ -730,6 +1039,7 @@ impl Handler for Terminal {
 
     fn set_cursor_visible(&mut self, visible: bool) {
         self.cursor.visible = visible;
+        self.modes.cursor_visible = visible;
     }
 
     fn reverse_index(&mut self) {
@@ -751,11 +1061,30 @@ impl Handler for Terminal {
     fn set_mode(&mut self, mode: u16, enable: bool) {
         match mode {
             1 => self.modes.application_cursor = enable,    // DECCKM
-            6 => self.modes.origin_mode = enable,           // DECOM
+            3 => {                                           // DECCOLM - 132/80 column mode
+                // Would need to resize terminal - typically ignored
+            }
+            4 => {},                                         // DECSCLM - smooth scroll (ignored)
+            5 => {},                                         // DECSCNM - reverse video (TODO)
+            6 => {                                           // DECOM - origin mode
+                self.modes.origin_mode = enable;
+                // Move cursor to origin
+                self.cursor.col = 0;
+                self.cursor.line = if enable { self.scroll_top } else { 0 };
+            }
             7 => self.modes.auto_wrap = enable,             // DECAWM
+            12 => {},                                        // Cursor blink (ignored for now)
+            20 => self.modes.linefeed_mode = enable,        // LNM
             25 => {                                          // DECTCEM
                 self.cursor.visible = enable;
                 self.modes.cursor_visible = enable;
+            }
+            47 => {                                          // Alternate screen (old)
+                if enable {
+                    self.switch_to_alternate();
+                } else {
+                    self.switch_to_primary();
+                }
             }
             1000 => {                                        // X10 mouse
                 self.modes.mouse_tracking = if enable { MouseMode::X10 } else { MouseMode::None };
@@ -766,12 +1095,38 @@ impl Handler for Terminal {
             1003 => {                                        // Any-event mouse
                 self.modes.mouse_tracking = if enable { MouseMode::AnyMotion } else { MouseMode::None };
             }
+            1004 => self.modes.focus_reporting = enable,    // Focus events
+            1005 => {},                                      // UTF-8 mouse mode (deprecated)
             1006 => {                                        // SGR mouse mode
                 if enable {
                     self.modes.mouse_tracking = MouseMode::Sgr;
                 }
             }
-            1004 => self.modes.focus_reporting = enable,    // Focus events
+            1015 => {},                                      // URXVT mouse mode (deprecated)
+            1047 => {                                        // Alternate screen (secondary)
+                if enable {
+                    self.switch_to_alternate();
+                } else {
+                    self.switch_to_primary();
+                }
+            }
+            1048 => {                                        // Save/restore cursor
+                if enable {
+                    self.save_cursor();
+                } else {
+                    self.restore_cursor();
+                }
+            }
+            1049 => {                                        // Alternate screen + cursor save
+                if enable {
+                    self.save_cursor();
+                    self.switch_to_alternate();
+                    self.grid.clear();
+                } else {
+                    self.switch_to_primary();
+                    self.restore_cursor();
+                }
+            }
             2004 => self.modes.bracketed_paste = enable,    // Bracketed paste
             _ => {} // Unknown mode, ignore
         }
@@ -796,20 +1151,12 @@ impl Handler for Terminal {
     }
 
     fn clipboard(&mut self, _clipboard: char, _data: Option<&str>) {
-        // Clipboard operations are handled at the application level
-        // Terminal just receives the request but doesn't act on it directly
-        // for security reasons (per spec: "many terminals disable this by default")
+        // Handled at application level
     }
 
     fn decrqss(&mut self, query: &str) -> Option<Vec<u8>> {
-        // DECRQSS - Request Selection or Setting
-        // Response format: DCS 1 $ r Pt ST (valid) or DCS 0 $ r ST (invalid)
-        // where Pt is the setting value
-
         let response: String = match query {
-            // SGR - Select Graphic Rendition
             "m" => {
-                // Build SGR sequence from current cursor attributes
                 let mut params: Vec<String> = Vec::new();
 
                 if self.cursor.flags.contains(CellFlags::BOLD) {
@@ -837,52 +1184,35 @@ impl Handler for Terminal {
                     params.push("9".to_string());
                 }
 
-                // Add foreground color (true color)
                 let fg = &self.cursor.fg;
                 params.push(format!("38;2;{};{};{}", fg.r, fg.g, fg.b));
 
-                // Add background color (true color)
                 let bg = &self.cursor.bg;
                 params.push(format!("48;2;{};{};{}", bg.r, bg.g, bg.b));
 
                 if params.is_empty() {
-                    "0m".to_string() // Reset/normal
+                    "0m".to_string()
                 } else {
                     format!("{}m", params.join(";"))
                 }
             }
-
-            // DECSTBM - Set Top and Bottom Margins
             "r" => {
                 format!("{};{}r", self.scroll_top + 1, self.scroll_bottom + 1)
             }
-
-            // DECSCUSR - Set Cursor Style (simplified)
             " q" => {
-                // Return block cursor (style 2)
                 "2 q".to_string()
             }
-
-            // DECSCL - Select Conformance Level
             "\"p" => {
-                // Report VT500 level 4
                 "64;1\"p".to_string()
             }
-
-            // DECSCA - Select Character Protection Attribute
             "\"q" => {
-                // Report not protected
                 "0\"q".to_string()
             }
-
-            // Unknown query
             _ => {
-                // Return invalid response
                 return Some(b"\x1bP0$r\x1b\\".to_vec());
             }
         };
 
-        // Valid response: DCS 1 $ r <response> ST
         Some(format!("\x1bP1$r{}\x1b\\", response).into_bytes())
     }
 }
@@ -933,7 +1263,7 @@ mod tests {
     #[test]
     fn terminal_process_csi_cursor() {
         let mut term = Terminal::new(80, 24, 1000);
-        term.process(b"\x1b[10;20H"); // Move to line 10, col 20
+        term.process(b"\x1b[10;20H");
         assert_eq!(term.cursor.line, 9);
         assert_eq!(term.cursor.col, 19);
     }
@@ -942,14 +1272,14 @@ mod tests {
     fn terminal_process_csi_erase() {
         let mut term = Terminal::new(80, 24, 1000);
         term.process(b"ABCDE");
-        term.process(b"\x1b[H\x1b[2J"); // Home and clear screen
+        term.process(b"\x1b[H\x1b[2J");
         assert_eq!(term.grid.cell(0, 0).c(), ' ');
     }
 
     #[test]
     fn terminal_process_sgr() {
         let mut term = Terminal::new(80, 24, 1000);
-        term.process(b"\x1b[1;31mRed"); // Bold red
+        term.process(b"\x1b[1;31mRed");
         assert!(term.cursor.flags.contains(CellFlags::BOLD));
         assert_eq!(term.grid.cell(0, 0).c(), 'R');
     }
@@ -979,9 +1309,8 @@ mod tests {
     #[test]
     fn terminal_scroll_at_bottom() {
         let mut term = Terminal::new(80, 5, 1000);
-        term.cursor.line = 4; // Last line
+        term.cursor.line = 4;
         term.linefeed();
-        // Should scroll, cursor stays at bottom
         assert_eq!(term.cursor.line, 4);
         assert_eq!(term.grid.scrollback_len(), 1);
     }
@@ -989,10 +1318,114 @@ mod tests {
     #[test]
     fn terminal_line_wrap() {
         let mut term = Terminal::new(5, 2, 1000);
-        term.process(b"ABCDE"); // Fill first line
-        assert_eq!(term.cursor.col, 5); // Past last column (wrap pending)
-        term.process(b"F"); // Should wrap
+        term.process(b"ABCDE");
+        assert_eq!(term.cursor.col, 5);
+        term.process(b"F");
         assert_eq!(term.cursor.line, 1);
         assert_eq!(term.cursor.col, 1);
+    }
+
+    #[test]
+    fn terminal_alternate_screen() {
+        let mut term = Terminal::new(80, 24, 1000);
+        term.process(b"Primary");
+        assert!(!term.is_alternate_screen());
+
+        // Switch to alternate
+        term.process(b"\x1b[?1049h");
+        assert!(term.is_alternate_screen());
+        assert_eq!(term.grid.cell(0, 0).c(), ' '); // Alternate is clear
+
+        term.process(b"Alternate");
+
+        // Switch back
+        term.process(b"\x1b[?1049l");
+        assert!(!term.is_alternate_screen());
+        assert_eq!(term.grid.cell(0, 0).c(), 'P'); // Primary content restored
+    }
+
+    #[test]
+    fn terminal_viewport_scroll() {
+        let mut term = Terminal::new(80, 5, 100);
+        
+        // Generate some scrollback
+        for i in 0..20 {
+            term.process(format!("Line {}\n", i).as_bytes());
+        }
+
+        assert_eq!(term.viewport_offset, 0);
+        assert!(term.grid.scrollback_len() > 0);
+
+        term.scroll_viewport_up(5);
+        assert_eq!(term.viewport_offset, 5);
+
+        term.scroll_viewport_down(3);
+        assert_eq!(term.viewport_offset, 2);
+
+        term.reset_viewport();
+        assert_eq!(term.viewport_offset, 0);
+    }
+
+    #[test]
+    fn terminal_bell() {
+        let mut term = Terminal::new(80, 24, 1000);
+        assert!(term.take_pending_bell().is_none());
+
+        term.bell();
+        assert!(term.has_pending_bell());
+
+        let bell = term.take_pending_bell();
+        assert!(matches!(bell, Some(BellEvent::Both)));
+        assert!(!term.has_pending_bell());
+    }
+
+    #[test]
+    fn terminal_hyperlink() {
+        let mut term = Terminal::new(80, 24, 1000);
+        
+        // Set hyperlink
+        term.set_hyperlink(Some("test"), Some("https://example.com"));
+        assert!(term.current_hyperlink().is_some());
+
+        // Write some text with hyperlink
+        term.process(b"Click here");
+
+        // Check hyperlink was stored for cells
+        assert!(term.get_cell_hyperlink(0, 0).is_some());
+
+        // Clear hyperlink
+        term.set_hyperlink(None, None);
+        assert!(term.current_hyperlink().is_none());
+    }
+
+    #[test]
+    fn terminal_origin_mode() {
+        let mut term = Terminal::new(80, 24, 1000);
+        
+        // Set scroll region
+        term.set_scroll_region(5, 15);
+        
+        // Enable origin mode
+        term.set_mode(6, true);
+        assert!(term.modes.origin_mode);
+        assert_eq!(term.cursor.line, 4); // scroll_top (0-indexed)
+
+        // goto should be relative to scroll region
+        term.goto(0, 0);
+        assert_eq!(term.cursor.line, 4);
+    }
+
+    #[test]
+    fn terminal_application_keypad() {
+        let mut term = Terminal::new(80, 24, 1000);
+        assert!(!term.modes.application_keypad);
+
+        // ESC = enables application keypad
+        term.process(b"\x1b=");
+        assert!(term.modes.application_keypad);
+
+        // ESC > disables it
+        term.process(b"\x1b>");
+        assert!(!term.modes.application_keypad);
     }
 }

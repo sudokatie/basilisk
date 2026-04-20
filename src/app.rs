@@ -9,6 +9,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey, ModifiersState};
 use winit::window::{Window, WindowId};
 
+use crate::bell::{Bell, BellConfig};
 use crate::config::Config;
 use crate::input::{KeyCode, Modifiers, KeyboardHandler};
 use crate::mux::{Session, SessionId, SplitDirection};
@@ -26,6 +27,7 @@ pub struct App {
     session: Option<Session>,
     clipboard: Clipboard,
     selection: SelectionManager,
+    bell: Bell,
     
     // Prefix mode state (for tmux-like keybindings)
     prefix_active: bool,
@@ -67,6 +69,7 @@ impl App {
             session: None,
             clipboard: Clipboard::new(),
             selection: SelectionManager::new(),
+            bell: Bell::default(),
             prefix_active: false,
             prefix_time: None,
             modifiers: ModifiersState::empty(),
@@ -101,7 +104,6 @@ impl App {
     fn init_session(&mut self) -> Result<()> {
         let cols = self.config.terminal.cols;
         let rows = self.config.terminal.rows;
-        let scrollback = self.config.scrollback.lines;
 
         let mut session = Session::with_window(
             SessionId::new(1),
@@ -111,9 +113,13 @@ impl App {
         );
         session.set_shell(&self.config.terminal.shell);
 
-        // Spawn shell in the first pane
+        // Build color palette from config and set it on the terminal
+        let palette = self.config.colors.build_palette();
+
+        // Spawn shell in the first pane and configure terminal
         if let Some(window) = session.active_window_mut() {
             if let Some(pane) = window.active_pane_mut() {
+                pane.terminal_mut().set_color_palette(palette);
                 pane.spawn(&self.config.terminal.shell)?;
             }
         }
@@ -375,6 +381,20 @@ impl App {
             return;
         }
 
+        // Handle scrollback navigation (Shift+PageUp/PageDown)
+        if self.handle_scrollback_keys(&event) {
+            return;
+        }
+
+        // Reset viewport to live on any other key press
+        if let Some(session) = &mut self.session {
+            if let Some(pane) = session.active_pane_mut() {
+                if pane.terminal().is_viewing_scrollback() {
+                    pane.terminal_mut().reset_viewport();
+                }
+            }
+        }
+
         let mods = self.convert_modifiers();
 
         // Check for prefix key (configurable, default Ctrl+B)
@@ -458,6 +478,11 @@ impl App {
     fn handle_mouse_input(&mut self, button: MouseButton, state: ElementState) {
         match (button, state) {
             (MouseButton::Left, ElementState::Pressed) => {
+                // Check for hyperlink click (Ctrl+click)
+                if self.handle_hyperlink_click(self.mouse_position) {
+                    return;
+                }
+
                 self.mouse_pressed = true;
                 let (col, row) = self.pixel_to_cell(self.mouse_position);
                 
@@ -468,14 +493,34 @@ impl App {
                     // Start new selection
                     self.selection.start_normal(col, row);
                 }
+
+                // Reset viewport to live on click
+                if let Some(session) = &mut self.session {
+                    if let Some(pane) = session.active_pane_mut() {
+                        pane.terminal_mut().reset_viewport();
+                    }
+                }
             }
             (MouseButton::Left, ElementState::Released) => {
                 self.mouse_pressed = false;
             }
             (MouseButton::Middle, ElementState::Pressed) => {
-                // Middle click = paste
+                // Middle click = paste (with bracketed paste if enabled)
                 if let Ok(text) = self.clipboard.paste() {
-                    self.write_to_pty(text.as_bytes());
+                    if let Some(session) = &mut self.session {
+                        if let Some(pane) = session.active_pane_mut() {
+                            // Get bracketed paste sequences first (copies values)
+                            let bracketed = pane.keyboard().bracketed_paste;
+                            
+                            if bracketed {
+                                let _ = pane.write(b"\x1b[200~");
+                            }
+                            let _ = pane.write(text.as_bytes());
+                            if bracketed {
+                                let _ = pane.write(b"\x1b[201~");
+                            }
+                        }
+                    }
                 }
             }
             (MouseButton::Right, ElementState::Pressed) => {
@@ -507,19 +552,110 @@ impl App {
         let Some(session) = &mut self.session else { return };
         let Some(pane) = session.active_pane_mut() else { return };
 
-        // Send scroll events to terminal (for alternate screen apps)
-        // or scroll the scrollback
-        if lines > 0 {
-            // Scroll up
-            for _ in 0..lines.abs() {
-                let _ = pane.write(b"\x1b[A"); // Up arrow for now
+        // Check if on alternate screen - if so, send to application
+        if pane.terminal().is_alternate_screen() {
+            // Send scroll events to terminal application (vim, less, etc.)
+            if lines > 0 {
+                for _ in 0..lines.abs() {
+                    let _ = pane.write(b"\x1b[A");
+                }
+            } else if lines < 0 {
+                for _ in 0..lines.abs() {
+                    let _ = pane.write(b"\x1b[B");
+                }
             }
-        } else if lines < 0 {
-            // Scroll down
-            for _ in 0..lines.abs() {
-                let _ = pane.write(b"\x1b[B"); // Down arrow for now
+        } else {
+            // Primary screen - scroll the viewport through scrollback
+            let terminal = pane.terminal_mut();
+            if lines > 0 {
+                // Scroll up (into history)
+                terminal.scroll_viewport_up(lines.abs() as usize);
+            } else if lines < 0 {
+                // Scroll down (toward live)
+                terminal.scroll_viewport_down(lines.abs() as usize);
             }
         }
+    }
+
+    /// Handle Shift+PageUp/PageDown for scrollback
+    fn handle_scrollback_keys(&mut self, event: &KeyEvent) -> bool {
+        let mods = self.convert_modifiers();
+        
+        if !mods.shift {
+            return false;
+        }
+
+        let Some(session) = &mut self.session else { return false };
+        let Some(pane) = session.active_pane_mut() else { return false };
+
+        // Don't handle on alternate screen
+        if pane.terminal().is_alternate_screen() {
+            return false;
+        }
+
+        let terminal = pane.terminal_mut();
+        let page_size = terminal.grid().lines() as usize;
+
+        match &event.logical_key {
+            Key::Named(NamedKey::PageUp) => {
+                terminal.scroll_viewport_up(page_size);
+                true
+            }
+            Key::Named(NamedKey::PageDown) => {
+                terminal.scroll_viewport_down(page_size);
+                true
+            }
+            Key::Named(NamedKey::Home) if mods.ctrl => {
+                terminal.scroll_viewport_to_top();
+                true
+            }
+            Key::Named(NamedKey::End) if mods.ctrl => {
+                terminal.scroll_viewport_to_bottom();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Handle hyperlink click (Ctrl+click)
+    fn handle_hyperlink_click(&mut self, position: (f64, f64)) -> bool {
+        if !self.modifiers.control_key() {
+            return false;
+        }
+
+        let (col, row) = self.pixel_to_cell(position);
+
+        let Some(session) = &self.session else { return false };
+        let Some(pane) = session.active_pane() else { return false };
+
+        if let Some(hyperlink) = pane.terminal().get_cell_hyperlink(col, row) {
+            // Open URL
+            let url = hyperlink.url.clone();
+            log::info!("Opening hyperlink: {}", url);
+            
+            #[cfg(target_os = "macos")]
+            {
+                let _ = std::process::Command::new("open")
+                    .arg(&url)
+                    .spawn();
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let _ = std::process::Command::new("xdg-open")
+                    .arg(&url)
+                    .spawn();
+            }
+            #[cfg(target_os = "windows")]
+            {
+                let _ = std::process::Command::new("cmd")
+                    .args(["/c", "start", &url])
+                    .spawn();
+            }
+            
+            return true;
+        }
+
+        false
     }
 
     /// Convert pixel position to cell coordinates
@@ -542,6 +678,21 @@ impl App {
     fn process_pty(&mut self) {
         let Some(session) = &mut self.session else { return };
         let _ = session.process_all();
+
+        // Check for bell events and sync modes
+        if let Some(pane) = session.active_pane_mut() {
+            // Handle bell
+            if let Some(_bell_event) = pane.terminal_mut().take_pending_bell() {
+                self.bell.ring();
+            }
+
+            // Sync keyboard handler with terminal modes (copy modes to avoid borrow conflict)
+            let modes = *pane.terminal().modes();
+            pane.keyboard_mut().sync_modes(&modes);
+        }
+
+        // Update bell state
+        self.bell.update();
     }
 
     /// Render frame
@@ -551,13 +702,32 @@ impl App {
         let Some(session) = &self.session else { return };
         let Some(pane) = session.active_pane() else { return };
 
+        // Get visual bell intensity for flash effect
+        let bell_intensity = self.bell.visual_intensity();
+
+        // Check if viewing scrollback
+        let viewing_scrollback = pane.terminal().is_viewing_scrollback();
+        let viewport_offset = pane.terminal().viewport_offset();
+
         // Generate vertices from terminal grid
-        let (vertices, indices) = text_renderer.render_grid(
+        let (mut vertices, indices) = text_renderer.render_grid_with_viewport(
             pane.terminal().grid(),
             pane.terminal().cursor(),
             &self.selection,
             &self.config.colors,
+            viewport_offset,
+            viewing_scrollback,
         );
+
+        // Apply visual bell flash effect
+        if bell_intensity > 1.0 {
+            for vertex in &mut vertices {
+                // Brighten colors for flash
+                vertex.bg_color[0] = (vertex.bg_color[0] * bell_intensity).min(1.0);
+                vertex.bg_color[1] = (vertex.bg_color[1] * bell_intensity).min(1.0);
+                vertex.bg_color[2] = (vertex.bg_color[2] * bell_intensity).min(1.0);
+            }
+        }
 
         // Update atlas if needed
         if text_renderer.atlas_dirty() {
@@ -626,9 +796,7 @@ impl ApplicationHandler for App {
             }
         }
 
-        // Note: Window opacity is typically set after creation via platform-specific APIs
-        // winit doesn't have a cross-platform opacity setter at creation time
-        let _opacity = self.config.window.opacity; // Stored for later use
+        let opacity = self.config.window.opacity;
 
         let window = match event_loop.create_window(window_attrs) {
             Ok(w) => Arc::new(w),
@@ -638,6 +806,11 @@ impl ApplicationHandler for App {
                 return;
             }
         };
+
+        // Apply window opacity (platform-specific)
+        if opacity < 1.0 {
+            set_window_opacity(&window, opacity);
+        }
 
         // Create renderer
         let renderer = pollster::block_on(Renderer::new(window.clone()));
@@ -746,6 +919,49 @@ enum PrefixAction {
     FocusPaneDown,
     FocusPaneLeft,
     FocusPaneRight,
+}
+
+/// Set window opacity (platform-specific)
+/// 
+/// Note: Full implementation requires platform-specific crates:
+/// - macOS: objc/cocoa crate for NSWindow setAlphaValue
+/// - Linux/X11: x11 crate for _NET_WM_WINDOW_OPACITY
+/// - Windows: windows crate for SetLayeredWindowAttributes
+/// 
+/// For now, this logs the requested opacity. To fully implement:
+/// 1. Add objc2 crate for macOS
+/// 2. Add x11rb crate for Linux
+/// 3. Add windows crate for Windows
+fn set_window_opacity(window: &Window, opacity: f32) {
+    #[cfg(target_os = "macos")]
+    {
+        // macOS: Would use NSWindow.setAlphaValue via objc runtime
+        // Requires: objc2 = "0.5" and objc2-app-kit = "0.2"
+        log::info!("macOS: Window opacity {} requested (add objc2 crate to enable)", opacity);
+    }
+    
+    #[cfg(target_os = "linux")]
+    {
+        // X11: Set _NET_WM_WINDOW_OPACITY atom (CARDINAL, 32-bit opacity value)
+        // Wayland: Usually not supported (compositor-dependent)
+        // Requires: x11rb crate for X11 support
+        log::info!("Linux: Window opacity {} requested (add x11rb crate to enable)", opacity);
+    }
+    
+    #[cfg(target_os = "windows")]
+    {
+        // Windows: SetLayeredWindowAttributes with LWA_ALPHA
+        // Requires: windows crate
+        log::info!("Windows: Window opacity {} requested (add windows crate to enable)", opacity);
+    }
+    
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        log::info!("Window opacity {} not supported on this platform", opacity);
+    }
+    
+    // Suppress unused variable warning
+    let _ = window;
 }
 
 #[cfg(test)]

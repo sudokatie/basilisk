@@ -22,8 +22,14 @@ pub enum Attr {
     CancelInverse,
     CancelHidden,
     CancelStrike,
+    /// True color foreground (RGB)
     Foreground(Color),
+    /// True color background (RGB)
     Background(Color),
+    /// ANSI indexed foreground (0-255, uses palette for 0-15)
+    ForegroundIndex(u8),
+    /// ANSI indexed background (0-255, uses palette for 0-15)
+    BackgroundIndex(u8),
     DefaultForeground,
     DefaultBackground,
 }
@@ -165,6 +171,49 @@ pub trait Handler {
     fn write_response(&mut self, _response: &[u8]) {
         // Default: do nothing (terminal implementations should override)
     }
+
+    /// Set tab stop at current cursor position (HTS - ESC H)
+    fn set_tab_stop(&mut self) {}
+
+    /// Set cursor shape (DECSCUSR)
+    /// 0,1 = block, 2 = block (not blinking), 3 = underline, 4 = underline (not blinking),
+    /// 5 = bar, 6 = bar (not blinking)
+    fn set_cursor_shape(&mut self, _shape: u16) {}
+
+    /// Primary Device Attributes (DA1) - CSI c or CSI 0 c
+    /// Terminal should respond with its capabilities
+    fn primary_device_attributes(&mut self) {}
+
+    /// Secondary Device Attributes (DA2) - CSI > c
+    fn secondary_device_attributes(&mut self) {}
+
+    /// Tertiary Device Attributes (DA3) - CSI = c
+    fn tertiary_device_attributes(&mut self) {}
+
+    /// Device Status Report (DSR) - CSI n
+    /// mode 5 = status report, mode 6 = cursor position report
+    fn device_status_report(&mut self, _mode: u16) {}
+
+    /// Designate character set G0 (ESC ( X)
+    fn designate_g0(&mut self, _charset: char) {}
+
+    /// Designate character set G1 (ESC ) X)
+    fn designate_g1(&mut self, _charset: char) {}
+
+    /// Shift to G0 (SI - 0x0F)
+    fn shift_in(&mut self) {}
+
+    /// Shift to G1 (SO - 0x0E)
+    fn shift_out(&mut self) {}
+
+    /// Soft reset (DECSTR) - CSI ! p
+    fn soft_reset(&mut self) {}
+
+    /// Request terminal parameters (DECREQTPARM) - CSI x
+    fn request_terminal_parameters(&mut self, _mode: u16) {}
+
+    /// Write data back to PTY (for terminal responses)
+    fn write_to_pty(&mut self, _data: &[u8]) {}
 }
 
 #[cfg(test)]

@@ -128,8 +128,8 @@ fn main() -> Result<()> {
             App::run(config)?;
         }
         None => {
-            // Launch terminal
-            App::run(config)?;
+            // Launch terminal with optional hold mode
+            App::run_with_options(config, cli.hold)?;
         }
     }
 
@@ -139,7 +139,7 @@ fn main() -> Result<()> {
 /// List running sessions
 fn list_sessions() -> Result<()> {
     let session_dir = session_directory();
-    
+
     if !session_dir.exists() {
         println!("No sessions running");
         return Ok(());
@@ -176,7 +176,7 @@ fn attach_session(session: Option<String>) -> Result<()> {
     use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 
     let session_dir = session_directory();
-    
+
     let session_name = match session {
         Some(name) => name,
         None => {
@@ -205,19 +205,19 @@ fn attach_session(session: Option<String>) -> Result<()> {
     };
 
     let socket_path = session_dir.join(format!("{}.sock", session_name));
-    
+
     if !socket_path.exists() {
         return Err(basilisk::Error::Config(format!("Session '{}' not found", session_name)));
     }
 
     println!("Attaching to session: {}", session_name);
-    
+
     // Save original terminal settings
     let stdin_fd = std::io::stdin().as_raw_fd();
     let stdin_borrowed = unsafe { BorrowedFd::borrow_raw(stdin_fd) };
     let original_termios = termios::tcgetattr(&stdin_borrowed)
         .map_err(|e| basilisk::Error::Pty(format!("Failed to get termios: {}", e)))?;
-    
+
     // Set raw mode
     let mut raw_termios = original_termios.clone();
     raw_termios.local_flags.remove(
@@ -227,7 +227,7 @@ fn attach_session(session: Option<String>) -> Result<()> {
         InputFlags::IXON | InputFlags::ICRNL | InputFlags::BRKINT | InputFlags::INPCK | InputFlags::ISTRIP
     );
     raw_termios.output_flags.remove(OutputFlags::OPOST);
-    
+
     termios::tcsetattr(&stdin_borrowed, SetArg::TCSANOW, &raw_termios)
         .map_err(|e| basilisk::Error::Pty(format!("Failed to set raw mode: {}", e)))?;
 
@@ -247,23 +247,23 @@ fn attach_session(session: Option<String>) -> Result<()> {
     // Connect to the session
     let mut client = basilisk::mux::SessionClient::connect(&session_name)?;
     client.send(&basilisk::mux::IpcMessage::Attach)?;
-    
+
     match client.recv()? {
         Some(basilisk::mux::IpcMessage::AttachAck { cols, rows }) => {
             eprintln!("Attached to session ({}x{})", cols, rows);
-            
+
             client.set_nonblocking(true)?;
-            
+
             let mut stdin = std::io::stdin();
             let mut stdout = std::io::stdout();
             let mut input_buf = [0u8; 4096];
-            
+
             // Main I/O loop
             loop {
                 // Use poll() to wait for input on stdin
                 let stdin_borrowed = unsafe { BorrowedFd::borrow_raw(stdin_fd) };
                 let mut poll_fds = [PollFd::new(stdin_borrowed, PollFlags::POLLIN)];
-                
+
                 match poll(&mut poll_fds, PollTimeout::from(10u16)) { // 10ms timeout
                     Ok(n) if n > 0 => {
                         // stdin has data
@@ -290,7 +290,7 @@ fn attach_session(session: Option<String>) -> Result<()> {
                         break;
                     }
                 }
-                
+
                 // Check for output from session (non-blocking)
                 match client.recv() {
                     Ok(Some(basilisk::mux::IpcMessage::Output(data))) => {

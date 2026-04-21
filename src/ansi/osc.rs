@@ -178,10 +178,46 @@ pub fn dispatch<H: Handler>(handler: &mut H, params: &[Vec<u8>]) {
 
         // OSC 133: Shell integration / prompt marking (iTerm2/FinalTerm)
         133 => {
-            // ;A = prompt start, ;B = command start, ;C = output start, ;D = command finished
+            handle_shell_integration(handler, &params[1..]);
         }
 
         _ => {} // Unknown OSC, ignore
+    }
+}
+
+/// Handle OSC 133 shell integration markers
+fn handle_shell_integration<H: Handler>(_handler: &mut H, params: &[Vec<u8>]) {
+    if params.is_empty() {
+        return;
+    }
+
+    // Parse the marker type
+    let marker = params.get(0)
+        .and_then(|s| std::str::from_utf8(s).ok())
+        .and_then(|s| s.chars().next());
+
+    match marker {
+        Some('A') => {
+            // Prompt start - marks beginning of shell prompt
+            // handler.shell_prompt_start();
+        }
+        Some('B') => {
+            // Command start - user has typed command, cursor at command input
+            // handler.shell_command_start();
+        }
+        Some('C') => {
+            // Output start - command is running, output begins
+            // handler.shell_output_start();
+        }
+        Some('D') => {
+            // Command finished - parse exit code if present
+            // Format: OSC 133 ; D ; <exit_code> ST
+            let _exit_code = params.get(1)
+                .and_then(|s| std::str::from_utf8(s).ok())
+                .and_then(|s| s.parse::<i32>().ok());
+            // handler.shell_command_finished(exit_code);
+        }
+        _ => {}
     }
 }
 
@@ -221,7 +257,8 @@ fn handle_palette_color<H: Handler>(_handler: &mut H, params: &[Vec<u8>]) {
     }
 }
 
-/// Handle OSC 8 hyperlink
+/// Handle OSC 8 hyperlink (currently handled inline in dispatch, kept for future use)
+#[allow(dead_code)]
 fn handle_hyperlink<H: Handler>(_handler: &mut H, params: &[Vec<u8>]) {
     if params.is_empty() {
         return;

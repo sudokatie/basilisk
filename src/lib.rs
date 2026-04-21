@@ -15,6 +15,8 @@ pub mod app;
 pub mod clipboard;
 pub mod bell;
 pub mod metrics;
+pub mod window;
+pub mod ssh;
 
 pub use error::{Error, Result};
 pub use app::App;

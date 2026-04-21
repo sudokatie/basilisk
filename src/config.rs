@@ -6,6 +6,7 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 use crate::Result;
+use crate::term::cell::{Color, ColorPalette};
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
@@ -49,6 +50,7 @@ pub struct FontConfig {
     pub size: f32,
     pub bold_font: Option<String>,
     pub italic_font: Option<String>,
+    pub bold_italic_font: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -166,6 +168,7 @@ impl Default for FontConfig {
             size: 14.0,
             bold_font: None,
             italic_font: None,
+            bold_italic_font: None,
         }
     }
 }
@@ -213,9 +216,9 @@ impl ColorScheme {
     /// Build a 256-color palette with the first 16 colors from config
     pub fn build_palette(&self) -> Vec<crate::term::cell::Color> {
         use crate::term::cell::Color;
-        
+
         let mut palette = Vec::with_capacity(256);
-        
+
         // Standard 16 colors from config
         let colors = [
             &self.black,
@@ -261,6 +264,32 @@ impl ColorScheme {
 
         palette
     }
+
+    /// Convert color scheme to a terminal color palette
+    pub fn to_palette(&self) -> ColorPalette {
+        let parse = |hex: &str| -> Color {
+            Color::from_hex(hex).unwrap_or(Color::rgb(255, 255, 255))
+        };
+
+        ColorPalette::from_config(
+            parse(&self.black),
+            parse(&self.red),
+            parse(&self.green),
+            parse(&self.yellow),
+            parse(&self.blue),
+            parse(&self.magenta),
+            parse(&self.cyan),
+            parse(&self.white),
+            parse(&self.bright_black),
+            parse(&self.bright_red),
+            parse(&self.bright_green),
+            parse(&self.bright_yellow),
+            parse(&self.bright_blue),
+            parse(&self.bright_magenta),
+            parse(&self.bright_cyan),
+            parse(&self.bright_white),
+        )
+    }
 }
 
 impl Default for ScrollbackConfig {
@@ -300,6 +329,99 @@ impl Config {
     pub fn default_path() -> PathBuf {
         dirs_path().join("config.toml")
     }
+
+    /// Reload config from disk, returning only if changed
+    pub fn reload(path: &Path, current: &Self) -> Option<Self> {
+        match Self::load(path) {
+            Ok(new_config) => {
+                // Check if anything relevant changed
+                if new_config.colors != current.colors
+                    || new_config.font != current.font
+                    || new_config.window.opacity != current.window.opacity
+                {
+                    Some(new_config)
+                } else {
+                    None
+                }
+            }
+            Err(_) => None,
+        }
+    }
+}
+
+// Implement PartialEq for ColorScheme to detect changes
+impl PartialEq for ColorScheme {
+    fn eq(&self, other: &Self) -> bool {
+        self.foreground == other.foreground
+            && self.background == other.background
+            && self.cursor == other.cursor
+            && self.black == other.black
+            && self.red == other.red
+            && self.green == other.green
+            && self.yellow == other.yellow
+            && self.blue == other.blue
+            && self.magenta == other.magenta
+            && self.cyan == other.cyan
+            && self.white == other.white
+    }
+}
+
+impl PartialEq for FontConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.family == other.family
+            && (self.size - other.size).abs() < 0.01
+            && self.bold_font == other.bold_font
+            && self.italic_font == other.italic_font
+            && self.bold_italic_font == other.bold_italic_font
+    }
+}
+
+use std::sync::mpsc;
+use notify::{Watcher, RecursiveMode, Event, EventKind};
+
+/// Config file watcher for hot reload
+pub struct ConfigWatcher {
+    _watcher: notify::RecommendedWatcher,
+    rx: mpsc::Receiver<std::result::Result<Event, notify::Error>>,
+    config_path: PathBuf,
+}
+
+impl ConfigWatcher {
+    /// Create a new config watcher for the given path
+    pub fn new(config_path: PathBuf) -> Result<Self> {
+        let (tx, rx) = mpsc::channel();
+
+        let mut watcher = notify::recommended_watcher(move |res| {
+            let _ = tx.send(res);
+        }).map_err(|e| crate::Error::Config(e.to_string()))?;
+
+        // Watch the config file's parent directory to catch recreations
+        if let Some(parent) = config_path.parent() {
+            watcher.watch(parent, RecursiveMode::NonRecursive)
+                .map_err(|e| crate::Error::Config(e.to_string()))?;
+        }
+
+        Ok(Self {
+            _watcher: watcher,
+            rx,
+            config_path,
+        })
+    }
+
+    /// Check if config file was modified (non-blocking)
+    pub fn check_modified(&self) -> bool {
+        while let Ok(Ok(event)) = self.rx.try_recv() {
+            // Check if the event is for our config file
+            if let EventKind::Modify(_) | EventKind::Create(_) = event.kind {
+                for path in event.paths {
+                    if path == self.config_path {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
 }
 
 fn dirs_path() -> PathBuf {
@@ -333,5 +455,45 @@ lines = 5000
         assert_eq!(config.font.family, "JetBrains Mono");
         assert_eq!(config.font.size, 16.0);
         assert_eq!(config.scrollback.lines, 5000);
+    }
+
+    #[test]
+    fn color_scheme_to_palette() {
+        let scheme = ColorScheme::default();
+        let palette = scheme.to_palette();
+        
+        // Check that colors are properly converted from hex
+        // Default black is "#282a2e"
+        let black = palette.get(0);
+        assert_eq!(black.r, 0x28);
+        assert_eq!(black.g, 0x2a);
+        assert_eq!(black.b, 0x2e);
+        
+        // Default red is "#a54242"
+        let red = palette.get(1);
+        assert_eq!(red.r, 0xa5);
+        assert_eq!(red.g, 0x42);
+        assert_eq!(red.b, 0x42);
+    }
+
+    #[test]
+    fn custom_color_scheme_to_palette() {
+        let mut scheme = ColorScheme::default();
+        scheme.red = "#ff0000".into();
+        scheme.bright_red = "#ff8080".into();
+        
+        let palette = scheme.to_palette();
+        
+        // Check custom red
+        let red = palette.get(1);
+        assert_eq!(red.r, 255);
+        assert_eq!(red.g, 0);
+        assert_eq!(red.b, 0);
+        
+        // Check custom bright red
+        let bright_red = palette.get(9);
+        assert_eq!(bright_red.r, 255);
+        assert_eq!(bright_red.g, 0x80);
+        assert_eq!(bright_red.b, 0x80);
     }
 }

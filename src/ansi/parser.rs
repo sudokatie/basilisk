@@ -7,6 +7,11 @@ pub enum Action {
     Print(char),
     /// Execute a control code (C0/C1)
     Execute(u8),
+    /// ESC sequence with intermediates (e.g., ESC ( B for G0 charset)
+    EscDispatch {
+        intermediates: Vec<u8>,
+        final_byte: u8,
+    },
     /// CSI sequence dispatch
     CsiDispatch {
         params: Vec<u16>,
@@ -187,7 +192,10 @@ impl Parser {
             }
             0x30..=0x7e => {
                 self.state = State::Ground;
-                Some(Action::Execute(byte))
+                Some(Action::EscDispatch {
+                    intermediates: std::mem::take(&mut self.intermediates),
+                    final_byte: byte,
+                })
             }
             _ => {
                 self.state = State::Ground;

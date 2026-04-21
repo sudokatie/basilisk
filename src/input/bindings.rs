@@ -41,6 +41,30 @@ pub enum Action {
     ListWindows,
     /// Send prefix key literally
     SendPrefix,
+    /// Enter copy mode for keyboard-based selection
+    CopyMode,
+    /// Search mode
+    Search,
+    /// Scroll up
+    ScrollUp,
+    /// Scroll down
+    ScrollDown,
+    /// Scroll page up
+    ScrollPageUp,
+    /// Scroll page down
+    ScrollPageDown,
+    /// Scroll to top
+    ScrollToTop,
+    /// Scroll to bottom
+    ScrollToBottom,
+    /// Focus pane up
+    FocusPaneUp,
+    /// Focus pane down
+    FocusPaneDown,
+    /// Focus pane left
+    FocusPaneLeft,
+    /// Focus pane right
+    FocusPaneRight,
 }
 
 /// Modifier keys
@@ -49,6 +73,7 @@ pub struct Modifiers {
     pub ctrl: bool,
     pub alt: bool,
     pub shift: bool,
+    pub meta: bool,
 }
 
 impl Modifiers {
@@ -95,7 +120,8 @@ impl KeyCombo {
 
     /// Parse a key combo string like "ctrl+b" or "a"
     pub fn parse(s: &str) -> Option<Self> {
-        let parts: Vec<&str> = s.split('+').collect();
+        let lowered = s.to_lowercase();
+        let parts: Vec<&str> = lowered.split('+').collect();
         if parts.is_empty() {
             return None;
         }
@@ -104,11 +130,16 @@ impl KeyCombo {
         let mut key = None;
 
         for part in parts {
-            match part.to_lowercase().as_str() {
-                "ctrl" | "control" | "c" if part.len() > 1 => modifiers.ctrl = true,
+            match part.trim() {
+                "ctrl" | "control" => modifiers.ctrl = true,
                 "alt" | "meta" | "option" => modifiers.alt = true,
                 "shift" => modifiers.shift = true,
+                "super" | "cmd" | "win" => modifiers.meta = true,
                 s if s.len() == 1 => key = s.chars().next(),
+                "space" => key = Some(' '),
+                "enter" | "return" => key = Some('\n'),
+                "tab" => key = Some('\t'),
+                "escape" | "esc" => key = Some('\x1b'),
                 _ => {}
             }
         }
@@ -144,11 +175,36 @@ impl Default for Bindings {
     }
 }
 
+/// Parse action name to Action enum
+fn parse_action(name: &str) -> Option<Action> {
+    match name.to_lowercase().as_str() {
+        "new_window" | "newwindow" => Some(Action::NewWindow),
+        "close_pane" | "closepane" => Some(Action::ClosePane),
+        "split_horizontal" | "splithorizontal" | "hsplit" => Some(Action::SplitHorizontal),
+        "split_vertical" | "splitvertical" | "vsplit" => Some(Action::SplitVertical),
+        "next_window" | "nextwindow" => Some(Action::NextWindow),
+        "prev_window" | "prevwindow" => Some(Action::PrevWindow),
+        "copy" => Some(Action::Copy),
+        "paste" => Some(Action::Paste),
+        "detach" => Some(Action::Detach),
+        "zoom_pane" | "zoompane" | "zoom" => Some(Action::ZoomPane),
+        "copy_mode" | "copymode" => Some(Action::CopyMode),
+        "search" => Some(Action::Search),
+        "scroll_up" | "scrollup" => Some(Action::ScrollUp),
+        "scroll_down" | "scrolldown" => Some(Action::ScrollDown),
+        "scroll_page_up" | "scrollpageup" | "pageup" => Some(Action::ScrollPageUp),
+        "scroll_page_down" | "scrollpagedown" | "pagedown" => Some(Action::ScrollPageDown),
+        "scroll_to_top" | "scrolltotop" => Some(Action::ScrollToTop),
+        "scroll_to_bottom" | "scrolltobottom" => Some(Action::ScrollToBottom),
+        _ => None,
+    }
+}
+
 impl Bindings {
     /// Create a new binding manager with default bindings
     pub fn new() -> Self {
         let mut bindings = HashMap::new();
-        
+
         // Default tmux-style bindings (after prefix)
         bindings.insert('c', Action::NewWindow);
         bindings.insert('"', Action::SplitHorizontal);
@@ -175,10 +231,20 @@ impl Bindings {
         bindings.insert('b', Action::SendPrefix); // prefix+b sends prefix literally
 
         let mut direct_bindings = HashMap::new();
-        // Shift+Insert for paste (common terminal convention)
+        // Ctrl+Shift+C for copy
         direct_bindings.insert(
-            KeyCombo { key: '\x00', modifiers: Modifiers { ctrl: false, alt: false, shift: true } },
+            KeyCombo { key: 'c', modifiers: Modifiers { ctrl: true, alt: false, shift: true, meta: false } },
+            Action::Copy,
+        );
+        // Ctrl+Shift+V for paste
+        direct_bindings.insert(
+            KeyCombo { key: 'v', modifiers: Modifiers { ctrl: true, alt: false, shift: true, meta: false } },
             Action::Paste,
+        );
+        // Ctrl+Shift+F for search
+        direct_bindings.insert(
+            KeyCombo { key: 'f', modifiers: Modifiers { ctrl: true, alt: false, shift: true, meta: false } },
+            Action::Search,
         );
 
         Self {
@@ -187,6 +253,26 @@ impl Bindings {
             direct_bindings,
             state: BindingState::Normal,
         }
+    }
+
+    /// Create default bindings (alias for new())
+    pub fn default_bindings() -> Self {
+        Self::new()
+    }
+
+    /// Load bindings from config hashmap
+    pub fn from_config(config: &HashMap<String, String>) -> Self {
+        let mut bindings = Self::default_bindings();
+
+        for (action_name, key_combo) in config {
+            if let Some(combo) = KeyCombo::parse(key_combo) {
+                if let Some(action) = parse_action(action_name) {
+                    bindings.direct_bindings.insert(combo, action);
+                }
+            }
+        }
+
+        bindings
     }
 
     /// Create bindings with a custom prefix
@@ -233,8 +319,18 @@ impl Bindings {
         self.bindings.remove(&key);
     }
 
+    /// Look up action for a key combo (direct bindings)
+    pub fn get(&self, combo: &KeyCombo) -> Option<&Action> {
+        self.direct_bindings.get(combo)
+    }
+
+    /// Check if a key combo is bound (direct bindings)
+    pub fn is_bound(&self, combo: &KeyCombo) -> bool {
+        self.direct_bindings.contains_key(combo)
+    }
+
     /// Process a key event, returns an action if one should be triggered
-    /// 
+    ///
     /// Returns:
     /// - Some(action) if a binding was triggered
     /// - None if no binding matched (key should be sent to terminal)
@@ -298,7 +394,7 @@ mod tests {
     #[test]
     fn process_prefix_then_command() {
         let mut bindings = Bindings::new();
-        
+
         // Press Ctrl+B (prefix)
         let result = bindings.process_key('b', Modifiers::ctrl());
         assert!(result.is_none());
@@ -313,7 +409,7 @@ mod tests {
     #[test]
     fn process_prefix_then_split() {
         let mut bindings = Bindings::new();
-        
+
         bindings.process_key('b', Modifiers::ctrl());
         let result = bindings.process_key('"', Modifiers::none());
         assert_eq!(result, Some(Action::SplitHorizontal));
@@ -322,7 +418,7 @@ mod tests {
     #[test]
     fn process_prefix_then_window_number() {
         let mut bindings = Bindings::new();
-        
+
         bindings.process_key('b', Modifiers::ctrl());
         let result = bindings.process_key('3', Modifiers::none());
         assert_eq!(result, Some(Action::SelectWindow(3)));
@@ -331,7 +427,7 @@ mod tests {
     #[test]
     fn process_unknown_after_prefix() {
         let mut bindings = Bindings::new();
-        
+
         bindings.process_key('b', Modifiers::ctrl());
         let result = bindings.process_key('x', Modifiers::none());
         assert!(result.is_none());
@@ -341,7 +437,7 @@ mod tests {
     #[test]
     fn normal_key_passes_through() {
         let mut bindings = Bindings::new();
-        
+
         // Normal 'a' should pass through
         let result = bindings.process_key('a', Modifiers::none());
         assert!(result.is_none());
@@ -351,7 +447,7 @@ mod tests {
     #[test]
     fn custom_prefix() {
         let mut bindings = Bindings::with_prefix(KeyCombo::ctrl('a'));
-        
+
         // Ctrl+B should NOT activate prefix
         let result = bindings.process_key('b', Modifiers::ctrl());
         assert!(result.is_none());
@@ -377,6 +473,11 @@ mod tests {
         let combo = KeyCombo::parse("a").unwrap();
         assert_eq!(combo.key, 'a');
         assert!(!combo.modifiers.ctrl);
+
+        let combo = KeyCombo::parse("ctrl+shift+c").unwrap();
+        assert!(combo.modifiers.ctrl);
+        assert!(combo.modifiers.shift);
+        assert_eq!(combo.key, 'c');
     }
 
     #[test]
@@ -409,5 +510,12 @@ mod tests {
         let list = bindings.list_bindings();
         assert!(!list.is_empty());
         assert!(list.iter().any(|(k, _)| *k == 'c'));
+    }
+
+    #[test]
+    fn direct_binding_copy() {
+        let bindings = Bindings::default_bindings();
+        let combo = KeyCombo { key: 'c', modifiers: Modifiers { ctrl: true, alt: false, shift: true, meta: false } };
+        assert_eq!(bindings.get(&combo), Some(&Action::Copy));
     }
 }

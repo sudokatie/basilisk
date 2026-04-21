@@ -25,6 +25,9 @@ pub enum Error {
 
     #[error("Clipboard error: {0}")]
     Clipboard(String),
+
+    #[error("SSH error: {0}")]
+    Ssh(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
